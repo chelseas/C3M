@@ -1,6 +1,7 @@
 import torch
 from torch.autograd import grad
 import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 
 import importlib
 import numpy as np
@@ -38,6 +39,8 @@ os.system('cp *.py '+args.log)
 os.system('cp -r models/ '+args.log)
 os.system('cp -r configs/ '+args.log)
 os.system('cp -r systems/ '+args.log)
+writer = SummaryWriter(args.log + "/tb")
+global_steps = 0
 
 epsilon = args._lambda * 0.1
 
@@ -275,9 +278,16 @@ for epoch in range(args.epochs):
     loss, p1, p2, l3 = trainval(X_te, train=False, _lambda=0., acc=True, detach=False)
     print("Epoch %d: Testing loss/p1/p2/l3: "%epoch, loss, p1, p2, l3)
 
+    writer.add_scalar("Loss", loss, epoch)
+    writer.add_scalar("% of pts with max eig Q < 0", p1, epoch)
+    writer.add_scalar("% of pts with max eig C1_LHS < 0", p2, epoch)
+    writer.add_scalar("mean C2^2", l3, epoch)
+
     if p1+p2 >= best_acc:
         best_acc = p1 + p2
         filename = args.log+'/model_best.pth.tar'
         filename_controller = args.log+'/controller_best.pth.tar'
         torch.save({'args':args, 'precs':(loss, p1, p2), 'model_W': model_W.state_dict(), 'model_Wbot': model_Wbot.state_dict(), 'model_u_w1': model_u_w1.state_dict(), 'model_u_w2': model_u_w2.state_dict()}, filename)
         torch.save(u_func, filename_controller)
+
+    writer.close()
