@@ -62,6 +62,7 @@ if hasattr(system, 'Bbot_func'):
 
 model = importlib.import_module('model_'+args.task)
 get_model = model.get_model
+INVERSE_METRIC = model.INVERSE_METRIC
 
 model_W, model_Wbot, model_u_w1, model_u_w2, W_func, u_func = get_model(num_dim_x, num_dim_control, w_lb=args.w_lb, use_cuda=args.use_cuda)
 
@@ -161,8 +162,12 @@ def loss_pos_matrix_eigen_values(A):
 def forward(x, xref, uref, _lambda, verbose=False, acc=False, detach=False):
     # x: bs x n x 1
     bs = x.shape[0]
-    W = W_func(x)
-    M = torch.inverse(W)
+    if INVERSE_METRIC:
+        W = W_func(x)
+        M = torch.inverse(W)
+    else:
+        M = W_func(x)
+        W = torch.inverse(M)
     f = f_func(x)
     B = B_func(x)
     DfDx = Jacobian(f, x)
@@ -200,6 +205,7 @@ def forward(x, xref, uref, _lambda, verbose=False, acc=False, detach=False):
     loss += loss_pos_matrix_random_sampling(-Contraction - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.type()))
     loss += loss_pos_matrix_random_sampling(-C1_LHS_1 - epsilon * torch.eye(C1_LHS_1.shape[-1]).unsqueeze(0).type(x.type()))
     loss += loss_pos_matrix_random_sampling(args.w_ub * torch.eye(W.shape[-1]).unsqueeze(0).type(x.type()) - W)
+    # loss += loss_pos_matrix_random_sampling(W - args.w_lb * torch.eye(W.shape[-1]).unsqueeze(0).type(x.type()))  # Make sure W is positive definite
     loss += 1. * sum([1.*(C2**2).reshape(bs,-1).sum(dim=1).mean() for C2 in C2s])
 
     if verbose:
@@ -287,7 +293,9 @@ for epoch in range(args.epochs):
         best_acc = p1 + p2
         filename = args.log+'/model_best.pth.tar'
         filename_controller = args.log+'/controller_best.pth.tar'
+        filename_metric = args.log+'/metric_best.pth.tar'
         torch.save({'args':args, 'precs':(loss, p1, p2), 'model_W': model_W.state_dict(), 'model_Wbot': model_Wbot.state_dict(), 'model_u_w1': model_u_w1.state_dict(), 'model_u_w2': model_u_w2.state_dict()}, filename)
         torch.save(u_func, filename_controller)
+        torch.save(W_func, filename_metric)
 
     writer.close()

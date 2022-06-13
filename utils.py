@@ -1,6 +1,7 @@
 import contextlib
 import numpy as np
 
+
 @contextlib.contextmanager
 def temp_seed(seed):
     state = np.random.get_state()
@@ -10,11 +11,26 @@ def temp_seed(seed):
     finally:
         np.random.set_state(state)
 
-def EulerIntegrate(controller, f, B, xstar, ustar, xinit, t_max = 10, dt = 0.05, with_tracking = False, sigma = 0., noise_bound = None):
+
+def EulerIntegrate(
+    controller,
+    f,
+    B,
+    xstar,
+    ustar,
+    xinit,
+    t_max=10,
+    dt=0.05,
+    with_tracking=False,
+    sigma=0.0,
+    noise_bound=None,
+    metric_func=None,
+):
     t = np.arange(0, t_max, dt)
 
     trace = []
     u = []
+    M_trace = []
 
     xcurr = xinit
     trace.append(xcurr)
@@ -30,15 +46,20 @@ def EulerIntegrate(controller, f, B, xstar, ustar, xinit, t_max = 10, dt = 0.05,
         if not noise_bound:
             noise_bound = 3 * sigma
         noise = np.random.randn(*xcurr.shape) * sigma
-        noise[noise>noise_bound] = noise_bound
-        noise[noise<-noise_bound] = -noise_bound
+        noise[noise > noise_bound] = noise_bound
+        noise[noise < -noise_bound] = -noise_bound
 
         dx = f(xcurr) + B(xcurr).dot(ui) + noise
-        xnext =  xcurr + dx*dt
+        xnext = xcurr + dx * dt
         # xnext[xnext>100] = 100
         # xnext[xnext<-100] = -100
 
         trace.append(xnext)
         u.append(ui)
+
+        if metric_func is not None and with_tracking:
+            M_trace.append(metric_func(xcurr, xe))
+
         xcurr = xnext
-    return trace, u
+
+    return trace, u, M_trace

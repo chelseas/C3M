@@ -13,6 +13,22 @@ def get_controller_wrapper(controller_path):
 
     return controller
 
+
+def get_metric_wrapper(W_path):
+    _W_func = torch.load(W_path, map_location=torch.device('cpu'))
+    _W_func.cpu()
+
+    def metric(x, xe):
+        W = _W_func(torch.from_numpy(x).float().view(1,-1,1)).detach()
+        M = torch.inverse(W)
+        xe = torch.from_numpy(xe).float().view(1, -1, 1)
+        xeMxe = torch.nn.functional.bilinear(xe.view(1, 1, -1), xe.view(1, 1, -1), M)
+
+        return xeMxe.cpu().squeeze().numpy()
+
+    return metric
+
+
 def get_system_wrapper(system):
     num_dim_x = system.num_dim_x
     num_dim_control = system.num_dim_control
