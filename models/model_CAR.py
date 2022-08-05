@@ -18,8 +18,8 @@ class MixedTanh(nn.Module):
         self.mixing = mixing
 
     def forward(self, x):
-        tanh = torch.nn.functional.tanh(x)
-        hardtanh = torch.nn.functional.hardtanh(x) 
+        tanh = torch.tanh(x)
+        hardtanh = torch.nn.functional.hardtanh(x)
         return (1.0 - self.mixing) * tanh + self.mixing * hardtanh
 
 
@@ -118,28 +118,41 @@ class W_FUNC(nn.Module):
                 self.model_Wbot[i].set_mixing(mixing)
 
 
-def get_model(num_dim_x, num_dim_control, w_lb, use_cuda=False):
-    model_Wbot = torch.nn.Sequential(
-        torch.nn.Linear(1, 128, bias=True),
-        MixedTanh(),
-        torch.nn.Linear(128, (num_dim_x - num_dim_control) ** 2, bias=False),
+def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0):
+    M_width = 32
+    M_depth = 2
+    u_width = 32
+    u_depth = 2
+    if mixing > 0.0:
+        M_width = 64
+        M_depth = 4
+        u_width = 64
+        u_depth = 4
+
+    Wbot_layers = [torch.nn.Linear(1, M_width, bias=True), MixedTanh()]
+    for i in range(M_depth - 1):
+        Wbot_layers += [
+            torch.nn.Linear(M_width, M_width, bias=True),
+            MixedTanh(),
+        ]
+    Wbot_layers.append(
+        torch.nn.Linear(M_width, (num_dim_x - num_dim_control) ** 2, bias=False)
     )
+
+    model_Wbot = torch.nn.Sequential(*Wbot_layers)
 
     dim = effective_dim_end - effective_dim_start
-    model_W = torch.nn.Sequential(
-        torch.nn.Linear(dim, 128, bias=True),
-        MixedTanh(),
-        torch.nn.Linear(128, num_dim_x * num_dim_x, bias=False),
-    )
+    W_layers = [torch.nn.Linear(dim, M_width, bias=True), MixedTanh()]
+    for i in range(M_depth - 1):
+        W_layers += [torch.nn.Linear(M_width, M_width, bias=True), MixedTanh()]
+    W_layers.append(torch.nn.Linear(M_width, num_dim_x * num_dim_x, bias=False))
+    model_W = torch.nn.Sequential(*W_layers)
 
-    model_u_w1 = torch.nn.Sequential(
-        # torch.nn.Linear(2 * num_dim_x, num_dim_control, bias=True),
-        torch.nn.Linear(2 * num_dim_x, 64, bias=False),
-        MixedTanh(),
-        torch.nn.Linear(64, 64, bias=False),
-        MixedTanh(),
-        torch.nn.Linear(64, num_dim_control, bias=False),
-    )
+    u_layers = [torch.nn.Linear(2 * num_dim_x, u_width, bias=False), MixedTanh()]
+    for i in range(u_depth - 1):
+        u_layers += [torch.nn.Linear(u_width, u_width, bias=False), MixedTanh()]
+    u_layers.append(torch.nn.Linear(u_width, num_dim_control, bias=False))
+    model_u_w1 = torch.nn.Sequential(*u_layers)
 
     if use_cuda:
         model_W = model_W.cuda()
@@ -149,4 +162,33 @@ def get_model(num_dim_x, num_dim_control, w_lb, use_cuda=False):
     u_func = U_FUNC(model_u_w1, num_dim_x, num_dim_control)
     W_func = W_FUNC(model_W, model_Wbot, num_dim_x, num_dim_control, w_lb)
 
+    u_func.set_mixing(mixing)
+    W_func.set_mixing(mixing)
+
     return model_W, model_Wbot, model_u_w1, W_func, u_func
+
+
+def get_model(num_dim_x, num_dim_control, w_lb, use_cuda=False):
+    model_W, model_Wbot, model_u_w1, W_func, u_func = get_model_mixed(
+        num_dim_x, num_dim_control, w_lb, use_cuda=use_cuda, mixing=0.0
+    )
+    (
+        model_W_hard,
+        model_Wbot_hard,
+        model_u_w1_hard,
+        W_func_hard,
+        u_func_hard,
+    ) = get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=use_cuda, mixing=1.0)
+
+    return (
+        model_W,
+        model_Wbot,
+        model_u_w1,
+        W_func,
+        u_func,
+        model_W_hard,
+        model_Wbot_hard,
+        model_u_w1_hard,
+        W_func_hard,
+        u_func_hard,
+    )
