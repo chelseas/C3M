@@ -43,7 +43,7 @@ parser.add_argument(
     "--lr", dest="learning_rate", type=float, default=0.001, help="Base learning rate."
 )
 parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs.")
-parser.add_argument("--lr_step", type=int, default=5, help="")
+parser.add_argument("--lr_step", type=int, default=15, help="")
 parser.add_argument(
     "--lambda", type=float, dest="_lambda", default=0.5, help="Convergence rate: lambda"
 )
@@ -149,49 +149,6 @@ if "Bbot_func" not in locals():
         return Bbot.repeat(bs, 1, 1)
 
 
-gradient_bundle_size = 16
-gradient_bundle_variance = 0.1
-
-
-def zero_order_jacobian_estimate(f, x):
-    """
-    Compute the zero-order estimate of the gradient of f w.r.t. x.
-
-    args:
-        f: callable
-        x: bs x n tensor
-    """
-    bs = x.shape[0]
-    n = x.shape[1]
-
-    # Get the function value at x
-    f_x = f(x)
-
-    # Expand the size of x to match the size of the bundle
-    x = torch.repeat_interleave(x.unsqueeze(-1), gradient_bundle_size, dim=-1)
-
-    # Make somewhere to store the Jacobian
-    J = torch.zeros(*f_x.shape, n).type(x.type())
-
-    # Estimate the gradient in each direction of x
-    for i in range(n):
-        # Get the perturbations in this dimension of x
-        dx_i = gradient_bundle_variance * torch.randn(gradient_bundle_size)
-        x_plus_dx_i = x.clone()
-        x_plus_dx_i[:, i, :] += dx_i
-
-        # Get the function value at x + dx (iterate through each sample)
-        for j in range(gradient_bundle_size):
-            f_x_plus_dx_i = f(x_plus_dx_i[:, :, j])
-
-            # Accumulate it into a Jacobian estimator
-            J[:, :, i] += (f_x_plus_dx_i - f_x) / (
-                dx_i[j] * gradient_bundle_size
-            )
-
-    return J
-
-
 def Jacobian_Matrix(M, x):
     # NOTE that this function assume that data are independent of each other
     # along the batch dimension.
@@ -234,17 +191,6 @@ def weighted_gradients(W, v, x, detach=False):
         return (Jacobian_Matrix(W, x) * v.view(bs, 1, 1, -1)).sum(dim=3)
 
 
-def weighted_gradients_zero_order(f, v, x, detach=False):
-    # v, x: bs x n x 1
-    # DfDx: bs x n x n x n
-    assert v.size() == x.size()
-    bs = x.shape[0]
-    if detach:
-        return (zero_order_jacobian_estimate(W, x).detach() * v.view(bs, 1, 1, -1)).sum(dim=3)
-    else:
-        return (zero_order_jacobian_estimate(W, x) * v.view(bs, 1, 1, -1)).sum(dim=3)
-
-
 K = 1024
 
 
@@ -271,7 +217,7 @@ def loss_pos_matrix_eigen_values(A):
 
 
 def forward(
-    x, xref, uref, _lambda, verbose=False, acc=False, detach=False, clone=False, zero_order=False
+    x, xref, uref, _lambda, verbose=False, acc=False, detach=False, clone=False
 ):
     # Otherwise, just train the tanh networks
     # x: bs x n x 1
@@ -312,10 +258,7 @@ def forward(
         # Replace the M, W, and u with the hardtanh versions
         u, M, W = u_hard, M_hard, W_hard
 
-    if zero_order:
-        K = zero_order_jacobian_estimate(u_func, x)
-    else:
-        K = Jacobian(u, x)
+    K = Jacobian(u, x)
 
     A = DfDx + sum(
         [
@@ -324,18 +267,8 @@ def forward(
         ]
     )
     dot_x = f + B.matmul(u)
-    if zero_order:
-        if INVERSE_METRIC:
-            temp_M_func = lambda x: torch.inverse(W_func(x))
-            dot_M = weighted_gradients_zero_order(temp_M_func, dot_x, x, detach=detach)  # DMDt
-            dot_W = weighted_gradients_zero_order(W_func, dot_x, x, detach=detach)  # DWDt
-        else:
-            temp_W_func = lambda x: torch.inverse(W_func(x))
-            dot_M = weighted_gradients_zero_order(W_func, dot_x, x, detach=detach)  # DMDt
-            dot_W = weighted_gradients_zero_order(temp_W_func, dot_x, x, detach=detach)  # DWDt
-    else:
-        dot_M = weighted_gradients(M, dot_x, x, detach=detach)  # DMDt
-        dot_W = weighted_gradients(W, dot_x, x, detach=detach)  # DWDt
+    dot_M = weighted_gradients(M, dot_x, x, detach=detach)  # DMDt
+    dot_W = weighted_gradients(W, dot_x, x, detach=detach)  # DWDt
     if detach:
         Contraction = (
             dot_M

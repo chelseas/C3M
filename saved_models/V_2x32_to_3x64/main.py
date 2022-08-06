@@ -42,8 +42,8 @@ parser.add_argument(
 parser.add_argument(
     "--lr", dest="learning_rate", type=float, default=0.001, help="Base learning rate."
 )
-parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs.")
-parser.add_argument("--lr_step", type=int, default=5, help="")
+parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
+parser.add_argument("--lr_step", type=int, default=15, help="")
 parser.add_argument(
     "--lambda", type=float, dest="_lambda", default=0.5, help="Convergence rate: lambda"
 )
@@ -149,49 +149,6 @@ if "Bbot_func" not in locals():
         return Bbot.repeat(bs, 1, 1)
 
 
-gradient_bundle_size = 16
-gradient_bundle_variance = 0.1
-
-
-def zero_order_jacobian_estimate(f, x):
-    """
-    Compute the zero-order estimate of the gradient of f w.r.t. x.
-
-    args:
-        f: callable
-        x: bs x n tensor
-    """
-    bs = x.shape[0]
-    n = x.shape[1]
-
-    # Get the function value at x
-    f_x = f(x)
-
-    # Expand the size of x to match the size of the bundle
-    x = torch.repeat_interleave(x.unsqueeze(-1), gradient_bundle_size, dim=-1)
-
-    # Make somewhere to store the Jacobian
-    J = torch.zeros(*f_x.shape, n).type(x.type())
-
-    # Estimate the gradient in each direction of x
-    for i in range(n):
-        # Get the perturbations in this dimension of x
-        dx_i = gradient_bundle_variance * torch.randn(gradient_bundle_size)
-        x_plus_dx_i = x.clone()
-        x_plus_dx_i[:, i, :] += dx_i
-
-        # Get the function value at x + dx (iterate through each sample)
-        for j in range(gradient_bundle_size):
-            f_x_plus_dx_i = f(x_plus_dx_i[:, :, j])
-
-            # Accumulate it into a Jacobian estimator
-            J[:, :, i] += (f_x_plus_dx_i - f_x) / (
-                dx_i[j] * gradient_bundle_size
-            )
-
-    return J
-
-
 def Jacobian_Matrix(M, x):
     # NOTE that this function assume that data are independent of each other
     # along the batch dimension.
@@ -234,17 +191,6 @@ def weighted_gradients(W, v, x, detach=False):
         return (Jacobian_Matrix(W, x) * v.view(bs, 1, 1, -1)).sum(dim=3)
 
 
-def weighted_gradients_zero_order(f, v, x, detach=False):
-    # v, x: bs x n x 1
-    # DfDx: bs x n x n x n
-    assert v.size() == x.size()
-    bs = x.shape[0]
-    if detach:
-        return (zero_order_jacobian_estimate(W, x).detach() * v.view(bs, 1, 1, -1)).sum(dim=3)
-    else:
-        return (zero_order_jacobian_estimate(W, x) * v.view(bs, 1, 1, -1)).sum(dim=3)
-
-
 K = 1024
 
 
@@ -271,7 +217,7 @@ def loss_pos_matrix_eigen_values(A):
 
 
 def forward(
-    x, xref, uref, _lambda, verbose=False, acc=False, detach=False, clone=False, zero_order=False
+    x, xref, uref, _lambda, verbose=False, acc=False, detach=False, clone=False
 ):
     # Otherwise, just train the tanh networks
     # x: bs x n x 1
@@ -294,9 +240,10 @@ def forward(
 
     # If clone is set, train the hardtanh networks to match the tanh networks
     if clone:
+        clone_loss = 0.0
         # Clone the control
         u_hard = u_func_hard(x, x - xref, uref)
-        u_error = (u - u_hard) ** 2
+        clone_loss += ((u - u_hard) ** 2).mean()
 
         # Clone the metric
         if INVERSE_METRIC:
@@ -306,16 +253,13 @@ def forward(
             M_hard = W_func_hard(x)
             W_hard = torch.inverse(M_hard)
 
-        M_error = (M - M_hard) ** 2
-        W_error = (W - W_hard) ** 2
+        clone_loss += ((M - M_hard) ** 2).mean()
+        clone_loss += ((W - W_hard) ** 2).mean()
 
         # Replace the M, W, and u with the hardtanh versions
         u, M, W = u_hard, M_hard, W_hard
 
-    if zero_order:
-        K = zero_order_jacobian_estimate(u_func, x)
-    else:
-        K = Jacobian(u, x)
+    K = Jacobian(u, x)
 
     A = DfDx + sum(
         [
@@ -324,18 +268,8 @@ def forward(
         ]
     )
     dot_x = f + B.matmul(u)
-    if zero_order:
-        if INVERSE_METRIC:
-            temp_M_func = lambda x: torch.inverse(W_func(x))
-            dot_M = weighted_gradients_zero_order(temp_M_func, dot_x, x, detach=detach)  # DMDt
-            dot_W = weighted_gradients_zero_order(W_func, dot_x, x, detach=detach)  # DWDt
-        else:
-            temp_W_func = lambda x: torch.inverse(W_func(x))
-            dot_M = weighted_gradients_zero_order(W_func, dot_x, x, detach=detach)  # DMDt
-            dot_W = weighted_gradients_zero_order(temp_W_func, dot_x, x, detach=detach)  # DWDt
-    else:
-        dot_M = weighted_gradients(M, dot_x, x, detach=detach)  # DMDt
-        dot_W = weighted_gradients(W, dot_x, x, detach=detach)  # DWDt
+    dot_M = weighted_gradients(M, dot_x, x, detach=detach)  # DMDt
+    dot_W = weighted_gradients(W, dot_x, x, detach=detach)  # DWDt
     if detach:
         Contraction = (
             dot_M
@@ -388,21 +322,7 @@ def forward(
     loss += 1.0 * sum([1.0 * (C2 ** 2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s])
 
     if clone:
-        # Prioritize cloning in regions where the contraction condition is not satisfied
-        not_satisfied = torch.symeig(Contraction)[0].max(dim=-1)[0] >= 0
-
-        not_yet_satisfied_clone_loss = (
-            u_error[not_satisfied].mean()
-            + M_error[not_satisfied].mean()
-            + W_error[not_satisfied].mean()
-        )
-
-        overall_clone_loss = (
-            u_error.mean()
-            + M_error.mean()
-            + W_error.mean()
-        )
-        loss = 10 * not_yet_satisfied_clone_loss + 0.1 * overall_clone_loss
+        loss = clone_loss
 
     if verbose:
         print(
@@ -538,7 +458,7 @@ if args.load_model:
     x = []
     xref = []
     uref = []
-    for id in range(len(X_te[:10000])):
+    for id in range(len(X_te)):
         if args.use_cuda:
             x.append(torch.from_numpy(X_te[id][0]).float().cuda())
             xref.append(torch.from_numpy(X_te[id][1]).float().cuda())
@@ -595,44 +515,20 @@ if args.load_model:
     # for i in range(4):
     #     for j in range(4):
     #         axs[i, j].scatter(
-    #             x[violation, j].detach(),
-    #             x[violation, i].detach(),
-    #             c=max_eig_Q[violation],
+    #             x[violation, i].detach(), x[violation, j].detach(), c=max_eig_Q[violation]
     #         )
-    #         axs[i, j].set_xlabel(f"x_{j}")
-    #         axs[i, j].set_ylabel(f"x_{i}")
+    #         axs[i, j].set_xlabel(f"x_{i}")
+    #         axs[i, j].set_ylabel(f"x_{j}")
 
-    # fig = plt.figure()
-    # # ax = fig.add_subplot(projection="3d")
-    # ax = fig.add_subplot()
-    # ax.scatter(
-    #     x[violation, 2].detach(),
-    #     x[violation, 3].detach(),
-    #     c=max_eig_Q[violation],
-    # )
-    # # plt.colorbar()
-    # ax.set_xlabel("theta")
-    # ax.set_ylabel("velocity")
-    # ax.set_title("Maximum eigenvalue of Q (when > 0)")
-    # plt.show()
-
-    import seaborn as sns
-
-    max_eig_M_dot = torch.symeig(dot_M)[0].view(-1).detach()
-    MABK = (A + B.matmul(K)).transpose(1, 2).matmul(M) + M.matmul(A + B.matmul(K))
-    max_eig_MABK = torch.symeig(MABK)[0].view(-1).detach()
-    max_eig_M = torch.symeig(2 * _lambda * M)[0].view(-1).detach()
-    max_eig_Q = torch.symeig(Contraction)[0].view(-1).detach()
-
-    _, axs = plt.subplots(1, 3)
-    sns.histplot(x=max_eig_M_dot, ax=axs[0])
-    sns.histplot(x=max_eig_MABK, ax=axs[1])
-    sns.histplot(x=max_eig_Q, ax=axs[2])
-
-    axs[0].set_title("Mdot")
-    axs[1].set_title("MABK")
-    axs[2].set_title("Q")
-
+    fig = plt.figure()
+    ax = fig.add_subplot(projection="3d")
+    ax.scatter(
+        x[violation, 0].detach(),
+        x[violation, 2].detach(),
+        x[violation, 3].detach(),
+        c=max_eig_Q[violation],
+    )
+    # plt.colorbar()
     plt.show()
 
     sys.exit()
