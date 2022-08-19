@@ -44,6 +44,11 @@ python plot.py --pretrained log_QUADROTOR_8D/controller_best.pth.tar --task QUAD
 python plot.py --pretrained log_QUADROTOR_8D/controller_best.pth.tar --task QUADROTOR_8D --plot_type error
 ```
 
+For peak repoproducibility, Charles recommends
+```
+mkdir log/EXPERIMENT_NAME && python main.py --task CAR --log log/EXPERIMENT_NAME  
+```
+
 If you find this project useful, please cite:
 ```bibtex
 @article{sun2020learning,

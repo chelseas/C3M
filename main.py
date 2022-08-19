@@ -322,20 +322,21 @@ def forward(
 
     if clone:
         # Prioritize cloning in regions where the contraction condition is not satisfied
-        not_satisfied = torch.symeig(Contraction)[0].max(dim=-1) >= 0
+        # not_satisfied = torch.symeig(Contraction)[0].detach().cpu().numpy().max() >= 0
 
-        not_yet_satisfied_clone_loss = (
-            u_error[not_satisfied].mean()
-            + M_error[not_satisfied].mean()
-            + W_error[not_satisfied].mean()
-        )
+        # not_yet_satisfied_clone_loss = (
+        #     u_error[not_satisfied].mean()
+        #     + M_error[not_satisfied].mean()
+        #     + W_error[not_satisfied].mean()
+        # )
 
         overall_clone_loss = (
             u_error.mean()
             + M_error.mean()
             + W_error.mean()
         )
-        loss = 10 * not_yet_satisfied_clone_loss + 0.1 * overall_clone_loss
+        # loss = 10 * not_yet_satisfied_clone_loss + 0.1 * overall_clone_loss
+        loss = overall_clone_loss
 
     if verbose:
         print(
