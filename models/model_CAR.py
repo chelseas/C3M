@@ -19,7 +19,7 @@ class MixedTanh(nn.Module):
 
     def forward(self, x):
         tanh = torch.tanh(x)
-        hardtanh = torch.nn.functional.softplus # torch.nn.functional.hardtanh(x)
+        hardtanh = torch.nn.functional.softplus(x) # torch.nn.functional.hardtanh(x)
         return (1.0 - self.mixing) * tanh + self.mixing * hardtanh
 
 
