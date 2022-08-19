@@ -19,7 +19,7 @@ class MixedTanh(nn.Module):
 
     def forward(self, x):
         tanh = torch.tanh(x)
-        hardtanh = torch.nn.functional.hardtanh(x)
+        hardtanh = torch.nn.functional.softplus # torch.nn.functional.hardtanh(x)
         return (1.0 - self.mixing) * tanh + self.mixing * hardtanh
 
 
@@ -49,7 +49,7 @@ class U_FUNC(nn.Module):
     def convert_to_hardtanh(self):
         for i, layer in enumerate(self.model_u_w1):
             if layer._get_name() == "Tanh":
-                self.model_u_w1[i] = torch.nn.Hardtanh()
+                self.model_u_w1[i] = torch.nn.Softplus()
 
     def set_mixing(self, mixing):
         for i, layer in enumerate(self.model_u_w1):
@@ -102,11 +102,11 @@ class W_FUNC(nn.Module):
     def convert_to_hardtanh(self):
         for i, layer in enumerate(self.model_W):
             if layer._get_name() == "Tanh":
-                self.model_W[i] = torch.nn.Hardtanh()
+                self.model_W[i] = torch.nn.Softplus()
 
         for i, layer in enumerate(self.model_Wbot):
             if layer._get_name() == "Tanh":
-                self.model_Wbot[i] = torch.nn.Hardtanh()
+                self.model_Wbot[i] = torch.nn.Softplus()
 
     def set_mixing(self, mixing):
         for i, layer in enumerate(self.model_W):

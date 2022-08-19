@@ -574,6 +574,7 @@ if args.load_model:
 
 
 # Start training a tanh network
+print("cuda available? ", torch.cuda.is_available())
 for epoch in range(args.epochs):
     adjust_learning_rate(optimizer, epoch)
     loss, _, _, _ = trainval(
@@ -617,7 +618,7 @@ for epoch in range(args.epochs):
 
 
 # Once that's trained, train a hardtanh network to imitate it
-print("------------ Initial training done; transferring to hardtanh ------------")
+print("------------ Initial training done; transferring to SOFTPLUS ------------")
 best_acc = 0
 args.learning_rate = 0.01
 for epoch in range(args.epochs):
