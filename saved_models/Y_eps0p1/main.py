@@ -34,7 +34,7 @@ parser.add_argument(
 parser.set_defaults(load_model=False)
 parser.add_argument("--bs", type=int, default=1024, help="Batch size.")
 parser.add_argument(
-    "--num_train", type=int, default=4 * 32768 + 0 * 131072, help="Number of samples for training."
+    "--num_train", type=int, default=131072 * 4, help="Number of samples for training."
 )  # 4096 * 32
 parser.add_argument(
     "--num_test", type=int, default=32768, help="Number of samples for testing."
@@ -71,7 +71,7 @@ writer = SummaryWriter(args.log + "/tb")
 global_steps = 0
 
 # epsilon = args._lambda
-epsilon = 1.0
+epsilon = -0.1
 
 config = importlib.import_module("config_" + args.task)
 X_MIN = config.X_MIN
@@ -547,8 +547,7 @@ if args.load_model:
     x = []
     xref = []
     uref = []
-    N = 30000
-    for id in range(len(X_te[:N])):
+    for id in range(len(X_te[:10000])):
         if args.use_cuda:
             x.append(torch.from_numpy(X_te[id][0]).float().cuda())
             xref.append(torch.from_numpy(X_te[id][1]).float().cuda())
@@ -580,8 +579,6 @@ if args.load_model:
     u = u_func(x, x - xref, uref)  # u: bs x m x 1 # TODO: x - xref
 
     K = Jacobian(u, x)
-    # temp_u_func = lambda x: u_func(x, x - xref, uref)
-    # K = zero_order_jacobian_estimate(temp_u_func, x)
 
     A = DfDx + sum(
         [
@@ -591,7 +588,7 @@ if args.load_model:
     )
     dot_x = f + B.matmul(u)
     dot_M = weighted_gradients(M, dot_x, x, detach=False)  # DMDt
-    # dot_M = weighted_gradients_zero_order(W_func, dot_x, x, detach=False)  # DMDt
+    dot_W = weighted_gradients(W, dot_x, x, detach=False)  # DWDt
     _lambda = 0.0
     Contraction = (
         dot_M
@@ -603,10 +600,7 @@ if args.load_model:
     # Plot the maximum eigenvalue of the contraction condition
     max_eig_Q = torch.symeig(Contraction)[0].max(dim=1)[0].detach()
     violation = max_eig_Q > 0.0
-    print("-------------")
-    print(f"Total # violations: {violation.sum()} ({violation.sum() * 100 / N} %)")
-    print(f"mean violation: {max_eig_Q[violation].mean()} ({max_eig_Q[violation].max()} max)")
-    print("-------------")
+    # max_eig_Q[max_eig_Q <= 0.0] = 0.0
     fig, axs = plt.subplots(4, 4)
     for i in range(4):
         for j in range(4):
@@ -620,14 +614,14 @@ if args.load_model:
             axs[i, j].set_ylabel(f"x_{i}")
             axs[i, j].set_xlim(
                 [
-                    x[:, j].detach().min() - 0.1,
-                    x[:, j].detach().max() + 0.1,
+                    x[violation, j].detach().min() - 0.1,
+                    x[violation, j].detach().max() + 0.1,
                 ]
             )
             axs[i, j].set_ylim(
                 [
-                    x[:, i].detach().min() - 0.1,
-                    x[:, i].detach().max() + 0.1,
+                    x[violation, i].detach().min() - 0.1,
+                    x[violation, i].detach().max() + 0.1,
                 ]
             )
 
