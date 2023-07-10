@@ -764,3 +764,10 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
+"""
+to use from another script:
+from main import main
+
+main(["--log", "saved_models/V_2x16_to_3x64", "--load_model"])
+"""
