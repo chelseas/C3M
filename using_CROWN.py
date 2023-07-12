@@ -123,11 +123,19 @@ dot_x = f + B.matmul(u)
 dot_M = weighted_gradients(M, dot_x, x, detach=False)  # DMDt
 # dot_M = weighted_gradients_zero_order(W_func, dot_x, x, detach=False)  # DMDt
 _lambda = 0.0
-Contraction = (
+Q = (
     dot_M
     + (A + B.matmul(K)).transpose(1, 2).matmul(M)
     + M.matmul(A + B.matmul(K))
     + 2 * _lambda * M
 )
 
-# todo: add gershgorin (?) or does pytorch have an "eig" function? what about an implicit layer? 
+eigenvals, eigenvecs = torch.linalg.eigh(Q) # I doubt that crown is able to handle this as I believe it contains an iterative algorithm ? I'm honestly not sure if pytorch can even differentiate through it
+max_eigen = eigenvals.max() #@huan this is the value to bound. we want this value to be less than zero
+
+# compute Gershgorin approximation of eigen values
+diagonal_entries = torch.diagonal(Q, dim1=-2, dim2=-1)
+off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
+# Compute upper bounds on each eigenvalue of Q
+gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
+gersh_ub_eig_Q_max = gersh_ub_eig_Q.max() #@huan this is an over approximation of the value to bound.
