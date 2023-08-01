@@ -15,6 +15,7 @@ task = "CAR"
 filename_controller = log + "/controller_best_hardtanh.pth.tar"
 filename_metric = log + "/metric_best_hardtanh.pth.tar"
 map_location = "cuda" if use_cuda else "cpu"
+# to remove indexing and stuff from these, have to possibly retrain models? And at least modify structure of networks
 W_func = torch.load(filename_metric, map_location)
 u_func = torch.load(filename_controller, map_location)
 
@@ -92,15 +93,11 @@ xref = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 uref = torch.rand((bs, num_dim_control, 1)).requires_grad_()
 
 # get the contraction condition
-print("INVERSE_METRIC: ", INVERSE_METRIC)
-if INVERSE_METRIC:
-    W = W_func(x)
-    M = torch.inverse(W)
-else:
-    M = W_func(x)
-    W = torch.inverse(M)
+assert(not INVERSE_METRIC)
+M = W_func(x)
 f = f_func(x)
 B = B_func(x)
+# The following two should be easy / already implemented somewhere in certver codebases
 DfDx = Jacobian(f, x)
 DBDx = torch.zeros(bs, num_dim_x, num_dim_x, num_dim_control).type(x.type())
 for i in range(num_dim_control):
