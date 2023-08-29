@@ -2,6 +2,8 @@ import torch
 from torch.autograd import grad
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
+# if torch.backends.mps.is_available():
+#     torch.set_default_device('mps')
 
 import importlib
 import numpy as np

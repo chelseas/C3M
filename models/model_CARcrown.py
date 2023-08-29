@@ -94,9 +94,9 @@ class W_FUNC(nn.Module):
         # W = self.model_W(x[:, effective_dim_start:effective_dim_end]).view(bs, self.num_dim_x, self.num_dim_x)
 
         W = W.transpose(1, 2).matmul(W)
-        W = W + self.w_lb * torch.eye(self.num_dim_x).view(
-            1, self.num_dim_x, self.num_dim_x
-        ).type(x.type())
+        print("0. W.shape = :", W.shape)
+        W = W + self.w_lb * torch.eye(self.num_dim_x).repeat(bs,1,1).type(x.type())
+        print("1. W.shape: ", W.shape)
         return W
 
     def convert_to_hardtanh(self):

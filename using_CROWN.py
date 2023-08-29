@@ -15,6 +15,10 @@ task = "CARcrown"
 # load the metric and controller
 filename_controller = log + "/controller_best_hardtanh.pth.tar"
 filename_metric = log + "/metric_best_hardtanh.pth.tar"
+# if torch.backends.mps.is_available():
+#     map_location = "mps"
+#     torch.set_default_device('mps') # buggy when casting tensors to mps types
+# else:
 map_location = "cuda" if use_cuda else "cpu"
 # maybe I don't need to restructure at all?
 W_func = torch.load(filename_metric, map_location)
@@ -95,3 +99,5 @@ off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row 
 # Compute upper bounds on each eigenvalue of Q
 gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
 gersh_ub_eig_Q_max = gersh_ub_eig_Q.max() #@huan this is an over approximation of the value to bound.
+gQ = torchviz.make_dot(gersh_ub_eig_Q_max, params={"u": u, "x": x, "xref": xref, "uref":uref})
+gQ.view()
