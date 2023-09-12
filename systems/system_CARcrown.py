@@ -8,11 +8,14 @@ def f_func(x):
     # f: bs x n x 1
     bs = x.shape[0]
 
-    x, y, theta, v = [x[:,0,0], x[:,1,0], x[:,2,0], x[:,3,0] ]
-    f = torch.stack([v * torch.cos(theta), 
-                     v * torch.sin(theta),
+    x, y, theta, v = [x[:,[0],[0]], x[:,[1],[0]], x[:,[2],[0]], x[:,[3],[0]] ]
+    # print(f"x.shape: {x.shape}")
+    f = torch.stack([v * torch.relu(theta), #torch.cos(theta), 
+                     v * torch.relu(theta), #torch.sin(theta),
                      torch.zeros_like(v),
-                     torch.zeros_like(v),], dim=1).type(x.type()).reshape(bs, num_dim_x, 1)
+                     torch.zeros_like(v),], dim=1).type(x.type()) #.reshape(bs, num_dim_x, 1)
+    # print(f"f.shape: {f.shape}")
+    # print("inside car f_func")
     return f
 
 def DfDx_func(x):
@@ -24,12 +27,20 @@ def DfDx_func(x):
     DfDx = torch.cat([row1, row2, row34], dim=1)
     return DfDx
 
+# def B_func(x):
+#     bs = x.shape[0]
+#     B = torch.zeros(bs, num_dim_x, num_dim_control).type(x.type())
+
+#     B[:, 2, 0] = 1
+#     B[:, 3, 1] = 1
+#     return B
+
 def B_func(x):
     bs = x.shape[0]
-    B = torch.zeros(bs, num_dim_x, num_dim_control).type(x.type())
-
-    B[:, 2, 0] = 1
-    B[:, 3, 1] = 1
+    B_top = torch.zeros(bs, 2, 2).type(x.type())
+    B_bot = torch.eye(2).repeat(bs,1,1).type(x.type()) # I think this is giving "tile op not supported" error *facepalm of exhaustion*
+    B = torch.stack([B_top, B_bot], dim=1)
+    print(f"B.shape: {B.shape}")
     return B
 
 def DBDx_func(x):
