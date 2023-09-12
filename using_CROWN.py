@@ -101,11 +101,11 @@ class CertVerModel(nn.Module):
     def __init__(self):
         super(CertVerModel, self).__init__()
         #clean upsupported ops
-        # self.W_func = create_clean_W_func()
         # self.f_func = f_func
         # self.B_func = B_func
         W_func, u_func = create_clean_Wu_funcs()
-        self.u_func = u_func
+        # self.u_func = u_func
+        self.W_func = W_func
     def forward(self, xall):
         x = xall[:,:num_dim_x]
         print("x.shape = ", x.shape)
@@ -118,8 +118,8 @@ class CertVerModel(nn.Module):
         # return self.W_func(x) # works!!!  with IBP at least
         # return self.f_func(x) # gives some error when I call lirpa_model(x_ptb)
         # return self.B_func(x) # gives Tile error or scatter error :///
-        return self.u_func(x, xerr, uref) # BoundedModule construction works but error on computing bounds
-
+        # return self.u_func(x, xerr, uref) # BoundedModule construction works but error on computing bounds
+        return self.W_func(x)
 
 certvermodel = CertVerModel()
 out = certvermodel(xall)
