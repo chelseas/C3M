@@ -75,41 +75,23 @@ class W_FUNC(nn.Module):
         W = self.model_W(x[:, effective_dim_start:effective_dim_end]).view(
             bs, self.num_dim_x, self.num_dim_x
         )
-        print("W.shape: ", W.shape)
+        # print("W.shape: ", W.shape)
         W_right = W[:, :, (self.num_dim_x - self.num_dim_control):]
 
-        # Wbot = self.model_Wbot(torch.ones(bs, 1).type(x.type())).view(
-        #     bs,
-        #     self.num_dim_x - self.num_dim_control,
-        #     self.num_dim_x - self.num_dim_control,
-        # )
-        
-        # W[
-        #     :,
-        #     0 : self.num_dim_x - self.num_dim_control,
-        #     0 : self.num_dim_x - self.num_dim_control,
-        # ] = Wbot
-        
-        # this next bit of code causes the scatter 
-        # W[
-        #     :,
-        #     self.num_dim_x - self.num_dim_control : self.num_dim_x,
-        #     0 : self.num_dim_x - self.num_dim_control,
-        # ] = torch.zeros(bs, self.num_dim_control, self.num_dim_x - self.num_dim_control)
+        Wbot = self.model_Wbot(torch.ones(bs, 1).type(x.type())).view(
+            bs,
+            self.num_dim_x - self.num_dim_control,
+            self.num_dim_x - self.num_dim_control,
+        )
 
-        # replace whole left side with zeros # works!!
-        W_spoof = torch.concatenate([torch.zeros(bs, self.num_dim_x, self.num_dim_x-self.num_dim_control), W_right], dim=2)
+        # stack to create final W matrix
+        W_left = torch.concatenate([Wbot, torch.zeros(bs, self.num_dim_control, self.num_dim_x-self.num_dim_control)], dim=1)
+        W_full = torch.concatenate([W_left, W_right], dim=2)
 
-        print("got here ~~")
-        return W_spoof
-
-        # # W = self.model_W(x[:, effective_dim_start:effective_dim_end]).view(bs, self.num_dim_x, self.num_dim_x)
-
-        # W = W.transpose(1, 2).matmul(W)
-        # print("0. W.shape = :", W.shape)
-        # W = W + self.w_lb * torch.eye(self.num_dim_x).repeat(bs,1,1).type(x.type())
-        # print("1. W.shape: ", W.shape)
-        # return W
+        W_final = W_full.transpose(1, 2).matmul(W_full)
+        print("0. W_final.shape = :", W_final.shape)
+        W_final = W_final + self.w_lb * torch.eye(self.num_dim_x).repeat(bs,1,1).type(x.type())
+        return W
 
     def convert_to_hardtanh(self):
         for i, layer in enumerate(self.model_W):

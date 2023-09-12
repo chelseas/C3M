@@ -1,9 +1,15 @@
 # preamble
 import torch
+import torch.nn as nn
 from torch.autograd import grad
 import torchviz
 import importlib
 import sys
+import colored_traceback
+colored_traceback.add_hook(always=True)
+sys.path.append("../Verifier_Development")
+from auto_LiRPA import BoundedModule, BoundedTensor
+from auto_LiRPA.perturbations import PerturbationLpNorm
 sys.path.append("systems")
 sys.path.append("configs")
 sys.path.append("models")
@@ -11,18 +17,25 @@ sys.path.append("models")
 log = "saved_models/Y_eps0p0"
 use_cuda = False
 task = "CARcrown"
+from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients, clean_unsupported_ops
+
 
 # load the metric and controller
-filename_controller = log + "/controller_best_hardtanh.pth.tar"
-filename_metric = log + "/metric_best_hardtanh.pth.tar"
+use_hardtanh = False
+if use_hardtanh:
+    filename_controller = log + "/controller_best_hardtanh.pth.tar"
+    filename_metric = log + "/metric_best_hardtanh.pth.tar"
+    mixing=1.0 # all hardtanh
+else:
+    filename_controller = log + "/controller_best.pth.tar"
+    filename_metric = log + "/metric_best.pth.tar"
+    mixing=0.0 # all tanh
+filename_model = log + "/model_best_hardtanh.pth.tar"
 # if torch.backends.mps.is_available():
 #     map_location = "mps"
 #     torch.set_default_device('mps') # buggy when casting tensors to mps types
 # else:
 map_location = "cuda" if use_cuda else "cpu"
-# maybe I don't need to restructure at all?
-W_func = torch.load(filename_metric, map_location)
-u_func = torch.load(filename_controller, map_location)
 
 # load functions for model
 system = importlib.import_module("system_" + task)
@@ -36,6 +49,7 @@ if hasattr(system, "Bbot_func"):
 model = importlib.import_module("model_" + task)
 # get_model = model.get_model
 INVERSE_METRIC = model.INVERSE_METRIC
+assert(not INVERSE_METRIC)
 
 if "Bbot_func" not in locals():
     def Bbot_func(x):  # columns of Bbot forms a basis of the null space of B^T
@@ -52,13 +66,67 @@ if "Bbot_func" not in locals():
         Bbot.unsqueeze(0)
         return Bbot.repeat(bs, 1, 1)
 
-from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients
-
 # spoof inputs
 bs = 1
 x = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 xref = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 uref = torch.rand((bs, num_dim_control, 1)).requires_grad_()
+xall = torch.concatenate((x, xref, uref), dim=1)
+
+# lirpa inputs
+eps = 0.3
+norm = float("inf")
+ptb = PerturbationLpNorm(norm = norm, eps = eps)
+x_ptb = BoundedTensor(x, ptb)
+
+def create_clean_W_func():
+    # load model dict to get params 
+    trained_model = torch.load(filename_model, map_location)
+    w_lb = trained_model['args'].w_lb
+    # load saved weights
+    W_func_loaded = torch.load(filename_metric, map_location)
+    # create new version of network with modified forward function
+    model_W, model_Wbot, model_u_w1, W_func, u_func =model.get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=mixing)
+    # put trained weights into new function
+    W_func.load_state_dict(W_func_loaded.state_dict())
+    # return modified W_func
+    W_func.model_W = clean_unsupported_ops(W_func.model_W)
+    W_func.model_Wbot = clean_unsupported_ops(W_func.model_Wbot)
+    return W_func
+
+class CertVerModel(nn.Module):
+    def __init__(self):
+        super(CertVerModel, self).__init__()
+        #clean upsupported ops
+        # self.W_func = create_clean_W_func()
+        # self.f_func = f_func
+        # self.B_func = B_func
+        self.u_func = torch.load(filename_controller, map_location)
+    def forward(self, xall):
+        x = xall[:,:num_dim_x]
+        xref = xall[:,num_dim_x:num_dim_x*2]
+        uref = xall[:,num_dim_x*2:]
+        xerr = x - xref
+        # return self.W_func(x) # works!!!  with IBP at least
+        # return self.f_func(x) # gives some error when I call lirpa_model(x_ptb)
+        # return self.B_func(x) # gives Tile error or scatter error :///
+        return self.u_func(x, xerr, uref)
+
+
+certvermodel = CertVerModel()
+out = certvermodel(xall)
+print(f"out: {out}")
+g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref})
+g.view()
+lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
+lirpa_model(x)
+# lirpa_model(x_ptb) # error here when returning f_func(x)
+lb, ub = lirpa_model.compute_bounds(x=(x_ptb,), method='IBP')
+print(f"lb: {lb}, ub: {ub}")
+assert(1==0)
+
+# W_func = torch.load(filename_metric, map_location)
+# u_func = torch.load(filename_controller, map_location)
 
 # get the contraction condition
 assert(not INVERSE_METRIC)
