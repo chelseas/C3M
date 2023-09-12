@@ -36,15 +36,19 @@ class U_FUNC(nn.Module):
         # x: B x n x 1
         # u: B x m x 1
         bs = x.shape[0]
-
-        w1_xe = self.model_u_w1(torch.cat([x, xe], dim=1).squeeze(-1)).reshape(
-            bs, self.num_dim_control, -1
+        w1_xe = self.model_u_w1(torch.cat([x, xe], dim=1).transpose(1,2)).reshape(
+            bs, self.num_dim_control, 1
         )
-        w1_x0 = self.model_u_w1(
-            torch.cat([x, torch.zeros(xe.shape).type(xe.type())], dim=1).squeeze(-1)
-        ).reshape(bs, self.num_dim_control, -1)
-        u = w1_xe - w1_x0 + uref
-        return u
+        # w1_xe_check = self.model_u_w1(torch.cat([x, xe], dim=1).squeeze(-1)).reshape(
+        #     bs, self.num_dim_control, -1
+        # )
+        # assert((w1_xe == w1_xe_check).all())
+        # w1_x0 = self.model_u_w1(
+        #     torch.cat([x, torch.zeros(xe.shape).type(xe.type())], dim=1).squeeze(-1)
+        # ).reshape(bs, self.num_dim_control, -1)
+        # u = w1_xe - w1_x0 + uref
+        # return u
+        return w1_xe
 
     def convert_to_hardtanh(self):
         for i, layer in enumerate(self.model_u_w1):

@@ -79,20 +79,23 @@ norm = float("inf")
 ptb = PerturbationLpNorm(norm = norm, eps = eps)
 x_ptb = BoundedTensor(x, ptb)
 
-def create_clean_W_func():
+def create_clean_Wu_funcs():
     # load model dict to get params 
     trained_model = torch.load(filename_model, map_location)
     w_lb = trained_model['args'].w_lb
     # load saved weights
     W_func_loaded = torch.load(filename_metric, map_location)
+    u_func_loaded = torch.load(filename_controller, map_location)
     # create new version of network with modified forward function
     model_W, model_Wbot, model_u_w1, W_func, u_func =model.get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=mixing)
     # put trained weights into new function
     W_func.load_state_dict(W_func_loaded.state_dict())
+    u_func.load_state_dict(u_func_loaded.state_dict())
     # return modified W_func
     W_func.model_W = clean_unsupported_ops(W_func.model_W)
     W_func.model_Wbot = clean_unsupported_ops(W_func.model_Wbot)
-    return W_func
+    u_func.model_u_w1 = clean_unsupported_ops(u_func.model_u_w1)
+    return W_func, u_func
 
 class CertVerModel(nn.Module):
     def __init__(self):
@@ -101,16 +104,21 @@ class CertVerModel(nn.Module):
         # self.W_func = create_clean_W_func()
         # self.f_func = f_func
         # self.B_func = B_func
-        self.u_func = torch.load(filename_controller, map_location)
+        W_func, u_func = create_clean_Wu_funcs()
+        self.u_func = u_func
     def forward(self, xall):
         x = xall[:,:num_dim_x]
+        print("x.shape = ", x.shape)
         xref = xall[:,num_dim_x:num_dim_x*2]
+        print("xref.shape = ", xref.shape)
         uref = xall[:,num_dim_x*2:]
+        print("uref.shape = ", uref.shape)
         xerr = x - xref
+        print("xerr.shape = ", xerr.shape)
         # return self.W_func(x) # works!!!  with IBP at least
         # return self.f_func(x) # gives some error when I call lirpa_model(x_ptb)
         # return self.B_func(x) # gives Tile error or scatter error :///
-        return self.u_func(x, xerr, uref)
+        return self.u_func(x, xerr, uref) # BoundedModule construction works but error on computing bounds
 
 
 certvermodel = CertVerModel()
@@ -119,9 +127,9 @@ print(f"out: {out}")
 g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref})
 g.view()
 lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
-lirpa_model(x)
+lirpa_model(xall)
 # lirpa_model(x_ptb) # error here when returning f_func(x)
-lb, ub = lirpa_model.compute_bounds(x=(x_ptb,), method='IBP')
+lb, ub = lirpa_model.compute_bounds(x=(x_ptb,), method='CROWN-Optimized (alpha-CROWN)') #'IBP')
 print(f"lb: {lb}, ub: {ub}")
 assert(1==0)
 
