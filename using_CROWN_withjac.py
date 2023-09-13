@@ -7,15 +7,18 @@ import importlib
 import sys
 import colored_traceback
 colored_traceback.add_hook(always=True)
-sys.path.append("../Verifier_Development")
+# sys.path.append("../Verifier_Development") # change sep  13: working directory change to Verifier_Development
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.jacobian import JacobianOP, GradNorm
-sys.path.append("systems")
-sys.path.append("configs")
-sys.path.append("models")
+# from auto_LiRPA.operators.jacobian import JacobianOP
+# from auto_LiRPA.operators.gradient_modules import GradNorm
+sys.path.append("../C3M/systems")
+sys.path.append("../C3M/configs")
+sys.path.append("../C3M/models")
+sys.path.append("../C3M")
 # options
-log = "saved_models/Y_eps0p0"
+log = "../C3M/saved_models/Y_eps0p0"
 use_cuda = False
 task = "CARcrown"
 from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients, clean_unsupported_ops
@@ -31,6 +34,7 @@ else:
     filename_controller = log + "/controller_best.pth.tar"
     filename_metric = log + "/metric_best.pth.tar"
     mixing=0.0 # all tanh
+
 filename_model = log + "/model_best_hardtanh.pth.tar"
 # if torch.backends.mps.is_available():
 #     map_location = "mps"
@@ -128,12 +132,18 @@ class CertVerModel(nn.Module):
         return JacobianOP.apply(M, x)
 
 certvermodel = CertVerModel()
-out = certvermodel(xall)
+out = certvermodel.forward_(xall)
 print(f"out: {out}")
 g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref})
 g.view()
-lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
-lirpa_model(xall)
+lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall)) # fails here with NotImplementedError BoundSlice
+def comparison_grad(xall):
+    return certvermodel.forward_(xall.requires_grad_(True))
+comp_grad = torch.autograd.functional.jacobian(comparison_grad, xall)
+lirp_grad = lirpa_model(xall)
+print(f"comp_grad.shape: {comp_grad.shape}")
+print(f"lirp_grad.shape: {lirp_grad.shape}")
+assert torch.allclose(comp_grad, lirp_grad)
 # lirpa_model(x_ptb) # error here when returning f_func(x)
 lb, ub = lirpa_model.compute_bounds(x=(x_ptb,), method='CROWN-Optimized (alpha-CROWN)') #'IBP')
 print(f"lb: {lb}, ub: {ub}")

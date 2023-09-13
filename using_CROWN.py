@@ -78,6 +78,7 @@ eps = 0.3
 norm = float("inf")
 ptb = PerturbationLpNorm(norm = norm, eps = eps)
 x_ptb = BoundedTensor(x, ptb)
+xall_ptb = BoundedTensor(xall, ptb)
 
 def create_clean_Wu_funcs():
     # load model dict to get params 
@@ -101,11 +102,11 @@ class CertVerModel(nn.Module):
     def __init__(self):
         super(CertVerModel, self).__init__()
         #clean upsupported ops
-        # self.f_func = f_func
+        self.f_func = f_func
         # self.B_func = B_func
-        W_func, u_func = create_clean_Wu_funcs()
+        # W_func, u_func = create_clean_Wu_funcs()
         # self.u_func = u_func
-        self.W_func = W_func
+        # self.W_func = W_func
     def forward(self, xall):
         x = xall[:,:num_dim_x]
         print("x.shape = ", x.shape)
@@ -116,10 +117,10 @@ class CertVerModel(nn.Module):
         xerr = x - xref
         print("xerr.shape = ", xerr.shape)
         # return self.W_func(x) # works!!!  with IBP at least
-        # return self.f_func(x) # gives some error when I call lirpa_model(x_ptb)
-        # return self.B_func(x) # gives Tile error or scatter error :///
+        return self.f_func(x) # gives some error when I call lirpa_model(x_ptb)
+        # return self.B_func(x) # gives Tile error or scatter error :/// # TODO: put this into the init function
         # return self.u_func(x, xerr, uref) # BoundedModule construction works but error on computing bounds
-        return self.W_func(x)
+        # return self.W_func(x)
 
 certvermodel = CertVerModel()
 out = certvermodel(xall)
@@ -129,7 +130,7 @@ g.view()
 lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
 lirpa_model(xall)
 # lirpa_model(x_ptb) # error here when returning f_func(x)
-lb, ub = lirpa_model.compute_bounds(x=(x_ptb,), method='CROWN-Optimized (alpha-CROWN)') #'IBP')
+lb, ub = lirpa_model.compute_bounds(x=(xall_ptb,), method='CROWN') #'IBP')
 print(f"lb: {lb}, ub: {ub}")
 assert(1==0)
 
