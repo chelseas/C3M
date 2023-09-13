@@ -8,9 +8,10 @@ def f_func(x):
     # f: bs x n x 1
     bs = x.shape[0]
 
-    x, y, theta, v = [x[:,[0],[0]], x[:,[1],[0]], x[:,[2],[0]], x[:,[3],[0]] ]
+    x, y, theta, v = [x[:, 0, 0], x[:, 1, 0], x[:, 2, 0], x[:, 3, 0]]
+
     # print(f"x.shape: {x.shape}")
-    f = torch.stack([v * torch.relu(theta), #torch.cos(theta), 
+    f = torch.stack([v * torch.relu(theta), #torch.cos(theta),
                      v * torch.relu(theta), #torch.sin(theta),
                      torch.zeros_like(v),
                      torch.zeros_like(v),], dim=1).type(x.type()) #.reshape(bs, num_dim_x, 1)
