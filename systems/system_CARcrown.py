@@ -40,8 +40,10 @@ def B_func(x):
     bs = x.shape[0]
     B_top = torch.zeros(bs, 2, 2).type(x.type())
     B_bot = torch.eye(2).repeat(bs,1,1).type(x.type()) # I think this is giving "tile op not supported" error *facepalm of exhaustion*
-    B = torch.stack([B_top, B_bot], dim=1)
-    print(f"B.shape: {B.shape}")
+    # print("B_top.shape = ", B_top.shape)
+    # print("B_bot.shape = ", B_bot.shape)
+    B = torch.concatenate([B_top, B_bot], dim=1)
+    # print(f"B.shape: {B.shape}")
     return B
 
 def DBDx_func(x):

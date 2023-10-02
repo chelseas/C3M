@@ -99,11 +99,11 @@ def create_clean_Wu_funcs():
     return W_func, u_func
 
 class CertVerModel(nn.Module):
-    def __init__(self):
+    def __init__(self, x):
         super(CertVerModel, self).__init__()
         #clean upsupported ops
-        self.f_func = f_func
-        # self.B_func = B_func
+        # self.f_func = f_func
+        # self.B_func_x = B_func(x) # init const with correct batch size
         # W_func, u_func = create_clean_Wu_funcs()
         # self.u_func = u_func
         # self.W_func = W_func
@@ -116,21 +116,23 @@ class CertVerModel(nn.Module):
         print("uref.shape = ", uref.shape)
         xerr = x - xref
         print("xerr.shape = ", xerr.shape)
-        # return self.W_func(x) # works!!!  with IBP at least
-        return self.f_func(x) # gives some error when I call lirpa_model(x_ptb)
-        # return self.B_func(x) # gives Tile error or scatter error :/// # TODO: put this into the init function
-        # return self.u_func(x, xerr, uref) # BoundedModule construction works but error on computing bounds
-        # return self.W_func(x)
+        # return self.W_func(x) # works!!!  with IBP and CROWN
+        # return self.f_func(x) # gives some error when I call lirpa_model(x_ptb)
+        # return self.B_func_x.matmul(uref) # Works to build graph but not call bounds
+        # return self.u_func(x, xerr, uref) # works! 
 
-certvermodel = CertVerModel()
+certvermodel = CertVerModel(xall)
 out = certvermodel(xall)
 print(f"out: {out}")
 g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref})
 g.view()
 lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
+print("Was able to build CROWN graph.")
 lirpa_model(xall)
+print("Was able to call CROWN graph.")
 # lirpa_model(x_ptb) # error here when returning f_func(x)
 lb, ub = lirpa_model.compute_bounds(x=(xall_ptb,), method='CROWN') #'IBP')
+print("was able to compute bounds using CROWN graph.")
 print(f"lb: {lb}, ub: {ub}")
 assert(1==0)
 
