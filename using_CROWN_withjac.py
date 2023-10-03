@@ -77,6 +77,7 @@ x = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 xref = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 uref = torch.rand((bs, num_dim_control, 1)).requires_grad_()
 xall = torch.concatenate((x, xref, uref), dim=1)
+xerr = x - xref
 
 # lirpa inputs
 eps = 0.3
@@ -103,13 +104,13 @@ def create_clean_Wu_funcs():
     return W_func, u_func
 
 class CertVerModel(nn.Module):
-    def __init__(self):
+    def __init__(self, x):
         super(CertVerModel, self).__init__()
         #clean upsupported ops
-        # self.f_func = f_func
-        # self.B_func = B_func
+        self.f_func = f_func
+        self.B_func_x = B_func(x) # init const with correct batch size
         W_func, u_func = create_clean_Wu_funcs()
-        # self.u_func = u_func
+        self.u_func = u_func
         self.W_func = W_func
     def forward_(self, xall):
         x = xall[:,:num_dim_x]
@@ -125,27 +126,46 @@ class CertVerModel(nn.Module):
         # return self.B_func(x) # gives Tile error or scatter error :///
         # return self.u_func(x, xerr, uref) # BoundedModule construction works but error on computing bounds
         return self.W_func(x)
-        #
     def forward(self, xall):
         M = self.forward_(xall)
         x = xall[:,:num_dim_x]
-        return JacobianOP.apply(M, x)
+        return JacobianOP.apply(M, x) # fails with NotImplementedError for BoundSlice
+        # u = self.forward_(xall)
+        # x = xall[:,:num_dim_x]
+        # K = JacobianOP.apply(u, x) # fails with NotImplementedError for BoundTranspose
+        # return K
+        # x = xall[:,:num_dim_x]
+        # xref = xall[:,num_dim_x:num_dim_x*2]
+        # uref = xall[:,num_dim_x*2:]
+        # xerr = x - xref
+        # u = self.u_func(x, xerr, uref)
+        # M = self.forward_(xall)
+        # x_dot = self.f_func(x) + self.B_func_x.matmul(u)
+        # dMdx = JacobianOP.apply(M, x)
+        # return dMdx.matmul(x_dot) # syntax for multiplication probably wrong
 
-certvermodel = CertVerModel()
+certvermodel = CertVerModel(xall)
 out = certvermodel.forward_(xall)
 print(f"out: {out}")
 g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref})
 g.view()
+print("try building graph")
 lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall)) # fails here with NotImplementedError BoundSlice
+print("Was able to build CROWN graph.")
 def comparison_grad(xall):
     return certvermodel.forward_(xall.requires_grad_(True))
-comp_grad = torch.autograd.functional.jacobian(comparison_grad, xall)
+dMdx = torch.autograd.functional.jacobian(comparison_grad, xall)
+# x_dot = f_func(x) + B_func(x).matmul(certvermodel.ufunc(x, xerr, uref))
+# comp_grad = dMdx.matmul(x_dot)
+comp_grad = dMdx
 lirp_grad = lirpa_model(xall)
+print("Was able to call CROWN graph.")
 print(f"comp_grad.shape: {comp_grad.shape}")
 print(f"lirp_grad.shape: {lirp_grad.shape}")
 assert torch.allclose(comp_grad, lirp_grad)
 # lirpa_model(x_ptb) # error here when returning f_func(x)
 lb, ub = lirpa_model.compute_bounds(x=(x_ptb,), method='CROWN-Optimized (alpha-CROWN)') #'IBP')
+print("was able to compute bounds using CROWN graph.")
 print(f"lb: {lb}, ub: {ub}")
 assert(1==0)
 

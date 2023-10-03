@@ -102,11 +102,13 @@ class CertVerModel(nn.Module):
     def __init__(self, x):
         super(CertVerModel, self).__init__()
         #clean upsupported ops
-        # self.f_func = f_func
-        # self.B_func_x = B_func(x) # init const with correct batch size
-        # W_func, u_func = create_clean_Wu_funcs()
-        # self.u_func = u_func
+        self.f_func = f_func
+        self.B_func_x = B_func(x) # init const with correct batch size
+        # self.DBDx_x = system.DBDx_func(x)
+        W_func, u_func = create_clean_Wu_funcs()
+        self.u_func = u_func
         # self.W_func = W_func
+        # self.DfDx = system.DfDx_func
     def forward(self, xall):
         x = xall[:,:num_dim_x]
         print("x.shape = ", x.shape)
@@ -120,6 +122,12 @@ class CertVerModel(nn.Module):
         # return self.f_func(x) # gives some error when I call lirpa_model(x_ptb)
         # return self.B_func_x.matmul(uref) # Works to build graph but not call bounds
         # return self.u_func(x, xerr, uref) # works! 
+        # return self.DfDx(x) # was able to build graph, just not call bounds (with sin and cos)
+        # u = self.u_func(x, xerr, uref).reshape(bs, 1, 1, num_dim_control)
+        # return self.DfDx(x) + (u.reshape(bs, 1, 1, num_dim_control)*self.DBDx_x).sum(dim=-1) # works to compute bounds!!! even with cos/sin
+        u = self.u_func(x, xerr, uref)
+        # return self.f_func(x) + self.B_func_x.matmul(u) # able to build graph, but when computing bounds get error: assert not self.perturbed AssertionError
+        return u
 
 certvermodel = CertVerModel(xall)
 out = certvermodel(xall)
