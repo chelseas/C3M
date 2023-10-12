@@ -50,7 +50,7 @@ num_dim_x = system.num_dim_x
 num_dim_control = system.num_dim_control
 if hasattr(system, "Bbot_func"):
     Bbot_func = system.Bbot_func
-    
+
 model = importlib.import_module("model_" + task)
 # get_model = model.get_model
 INVERSE_METRIC = model.INVERSE_METRIC
@@ -86,7 +86,7 @@ ptb = PerturbationLpNorm(norm = norm, eps = eps)
 x_ptb = BoundedTensor(x, ptb)
 
 def create_clean_Wu_funcs():
-    # load model dict to get params 
+    # load model dict to get params
     trained_model = torch.load(filename_model, map_location)
     w_lb = trained_model['args'].w_lb
     # load saved weights
@@ -128,8 +128,9 @@ class CertVerModel(nn.Module):
         return self.W_func(x)
     def forward(self, xall):
         M = self.forward_(xall)
-        x = xall[:,:num_dim_x]
-        return JacobianOP.apply(M, x) # fails with NotImplementedError for BoundSlice
+        jacobian = JacobianOP.apply(M, xall)
+        return jacobian[:, :, :num_dim_x]
+
         # u = self.forward_(xall)
         # x = xall[:,:num_dim_x]
         # K = JacobianOP.apply(u, x) # fails with NotImplementedError for BoundTranspose
@@ -148,7 +149,7 @@ certvermodel = CertVerModel(xall)
 out = certvermodel.forward_(xall)
 print(f"out: {out}")
 g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref})
-g.view()
+# g.view()
 print("try building graph")
 lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall)) # fails here with NotImplementedError BoundSlice
 print("Was able to build CROWN graph.")
@@ -183,7 +184,7 @@ DBDx = system.DBDx_func(x)
 _Bbot = Bbot_func(x)
 u = u_func(x, x - xref, uref)  # u: bs x m x 1 # TODO: x - xref
 g = torchviz.make_dot(u, params={"u": u, "x": x, "xref": xref, "uref":uref})
-g.view()
+# g.view()
 
 K = Jacobian(u, x)
 # temp_u_func = lambda x: u_func(x, x - xref, uref)
@@ -212,4 +213,4 @@ off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row 
 gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
 gersh_ub_eig_Q_max = gersh_ub_eig_Q.max() #@huan this is an over approximation of the value to bound.
 gQ = torchviz.make_dot(gersh_ub_eig_Q_max, params={"u": u, "x": x, "xref": xref, "uref":uref})
-gQ.view()
+# gQ.view()
