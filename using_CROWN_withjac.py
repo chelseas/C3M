@@ -145,6 +145,7 @@ class CertVerModel(nn.Module):
         # dMdx = JacobianOP.apply(M, x)
         # return dMdx.matmul(x_dot) # syntax for multiplication probably wrong
 
+xall = xall.squeeze(-1)
 certvermodel = CertVerModel(xall)
 out = certvermodel.forward_(xall)
 print(f"out: {out}")
