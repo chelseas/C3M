@@ -74,7 +74,7 @@ class W_FUNC(nn.Module):
 
     def forward(self, x):
         bs = x.shape[0]
-        x = x.squeeze(-1)
+        x = x.reshape(bs, -1)
 
         W = self.model_W(x[:, effective_dim_start:effective_dim_end]).view(
             bs, self.num_dim_x, self.num_dim_x

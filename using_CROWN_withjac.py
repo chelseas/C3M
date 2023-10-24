@@ -127,10 +127,11 @@ class CertVerModel(nn.Module):
         # return self.u_func(x, xerr, uref) # BoundedModule construction works but error on computing bounds
         return self.W_func(x)
     def forward(self, xall):
-        M = self.forward_(xall)
-        jacobian = JacobianOP.apply(M, xall)
-        return jacobian[:, :, :num_dim_x]
-
+        x = xall[:,:num_dim_x]
+        bs = xall.shape[0]
+        M = self.W_func(x).reshape(bs, -1)
+        print("M.shape: ", M.shape)
+        return JacobianOP.apply(M, x) # fails with NotImplementedError for BoundSqueeze
         # u = self.forward_(xall)
         # x = xall[:,:num_dim_x]
         # K = JacobianOP.apply(u, x) # fails with NotImplementedError for BoundTranspose
