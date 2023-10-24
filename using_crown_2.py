@@ -73,6 +73,7 @@ bs = 1
 lambda_ = 0.01
 x = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 xref = torch.rand((bs, num_dim_x, 1)).requires_grad_()
+xerr = x - xref
 uref = torch.rand((bs, num_dim_control, 1)).requires_grad_()
 xall = torch.concatenate((x, xref, uref), dim=1)
 
@@ -100,6 +101,14 @@ def create_clean_Wu_funcs():
     W_func.model_Wbot = clean_unsupported_ops(W_func.model_Wbot)
     u_func.model_u_w1 = clean_unsupported_ops(u_func.model_u_w1)
     return W_func, u_func
+
+# # test ufunc 
+# _, ufunc_test = create_clean_Wu_funcs()
+# print("testing ufunc ~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+# print("u_func(x): ", ufunc_test(x, xerr, uref))
+# print("testing ufunc over ~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+
+# assert 1== 0
 
 class CertVerModel(nn.Module):
     def __init__(self, x):
@@ -155,7 +164,7 @@ class CertVerModel(nn.Module):
 certvermodel = CertVerModel(xall)
 out = certvermodel(xall)
 print(f"out: {out}")
-g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref})
+g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref, "maxeigQ": out})
 g.view()
 print("trying to build CROWN graph ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~`")
 lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
