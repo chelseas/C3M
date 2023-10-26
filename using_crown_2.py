@@ -47,7 +47,7 @@ num_dim_x = system.num_dim_x
 num_dim_control = system.num_dim_control
 if hasattr(system, "Bbot_func"):
     Bbot_func = system.Bbot_func
-    
+
 model = importlib.import_module("model_" + task)
 # get_model = model.get_model
 INVERSE_METRIC = model.INVERSE_METRIC
@@ -85,7 +85,7 @@ x_ptb = BoundedTensor(x, ptb)
 xall_ptb = BoundedTensor(xall, ptb)
 
 def create_clean_Wu_funcs():
-    # load model dict to get params 
+    # load model dict to get params
     trained_model = torch.load(filename_model, map_location)
     w_lb = trained_model['args'].w_lb
     # load saved weights
@@ -102,7 +102,7 @@ def create_clean_Wu_funcs():
     u_func.model_u_w1 = clean_unsupported_ops(u_func.model_u_w1)
     return W_func, u_func
 
-# # test ufunc 
+# # test ufunc
 # _, ufunc_test = create_clean_Wu_funcs()
 # print("testing ufunc ~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
 # print("u_func(x): ", ufunc_test(x, xerr, uref))
@@ -149,23 +149,23 @@ class CertVerModel(nn.Module):
         # print("K.shape: ", K.shape)
         dMdt = dMdt_flat.reshape(bs, num_dim_x, num_dim_x)
         M_A_BK = M.matmul( A + self.B.matmul(K) )
-        Q = (dMdt + M_A_BK 
-                  + M_A_BK.transpose(1,2) 
-                  + 2 * lambda_ * M 
+        Q = (dMdt + M_A_BK
+                  + M_A_BK.transpose(1,2)
+                  + 2 * lambda_ * M
         )
         # compute Gershgorin approximation of eigen values
         diagonal_entries = torch.diagonal(Q, dim1=-2, dim2=-1)
         off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
         # Compute upper bounds on each eigenvalue of Q
         gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
-        gersh_ub_eig_Q_max = gersh_ub_eig_Q.max() 
+        gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
         return gersh_ub_eig_Q_max
 
 certvermodel = CertVerModel(xall)
 out = certvermodel(xall)
 print(f"out: {out}")
-g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref, "maxeigQ": out})
-g.view()
+# g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref, "maxeigQ": out})
+# g.view()
 print("trying to build CROWN graph ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~`")
 lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
 print("Was able to build CROWN graph.")
