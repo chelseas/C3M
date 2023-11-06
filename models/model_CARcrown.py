@@ -41,7 +41,7 @@ class U_FUNC(nn.Module):
             bs, self.num_dim_control, -1
         )
         w1_x0 = self.model_u_w1(
-            torch.cat([x, torch.zeros(xe.shape).type(xe.type())], dim=1).reshape(bs, -1)
+            torch.cat([x, torch.zeros_like(xe)], dim=1).reshape(bs, -1)
         ).reshape(bs, self.num_dim_control, -1)
         u = w1_xe - w1_x0 + uref
         return u
@@ -85,8 +85,8 @@ class W_FUNC(nn.Module):
         )
 
         # stack to create final W matrix
-        W_left = torch.concatenate([Wbot, torch.zeros(bs, self.num_dim_control, self.num_dim_x-self.num_dim_control)], dim=1)
-        W_full = torch.concatenate([W_left, W_right], dim=2)
+        W_left = torch.concat([Wbot, torch.zeros(bs, self.num_dim_control, self.num_dim_x-self.num_dim_control)], dim=1)
+        W_full = torch.concat([W_left, W_right], dim=2)
 
         W_final = W_full.transpose(1, 2).matmul(W_full)
         print("0. W_final.shape = :", W_final.shape)

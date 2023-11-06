@@ -42,7 +42,7 @@ def B_func(x):
     B_bot = torch.eye(2).repeat(bs,1,1).type(x.type()) # I think this is giving "tile op not supported" error *facepalm of exhaustion*
     # print("B_top.shape = ", B_top.shape)
     # print("B_bot.shape = ", B_bot.shape)
-    B = torch.concatenate([B_top, B_bot], dim=1)
+    B = torch.concat([B_top, B_bot], dim=1)
     # print(f"B.shape: {B.shape}")
     return B
 

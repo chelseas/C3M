@@ -75,7 +75,7 @@ x = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 xref = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 xerr = x - xref
 uref = torch.rand((bs, num_dim_control, 1)).requires_grad_()
-xall = torch.concatenate((x, xref, uref), dim=1)
+xall = torch.concat((x, xref, uref), dim=1)
 
 # lirpa inputs
 eps = 0.3
@@ -142,7 +142,7 @@ class CertVerModel(nn.Module):
         # print("x.shape = ", x.shape)
         # dMdx = JacobianOP.apply(M.reshape(bs, -1), x.reshape(bs, num_dim_x))
         dMdx = JacobianOP.apply(M.reshape(bs, -1), x)
-        dMdx = dMdx.squeeze(-1)
+        dMdx = dMdx.reshape(bs, -1, num_dim_x)
         # print("dMdx.shape: ", dMdx.shape)
         # print("dxdt.shape: ", dxdt.shape)
         dMdt_flat = dMdx.matmul(dxdt)
@@ -160,8 +160,8 @@ class CertVerModel(nn.Module):
         off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
         # Compute upper bounds on each eigenvalue of Q
         gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
-        gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
-        return gersh_ub_eig_Q_max
+        # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
+        return gersh_ub_eig_Q
 
 certvermodel = CertVerModel(xall)
 out = certvermodel(xall)
@@ -171,7 +171,7 @@ print(f"out: {out}")
 print("trying to build CROWN graph ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~`")
 lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
 print("Was able to build CROWN graph.")
-lirpa_model(xall)
+print('Output', lirpa_model(xall))
 print("Was able to call CROWN graph.")
 # lirpa_model(x_ptb) # error here when returning f_func(x)
 lb, ub = lirpa_model.compute_bounds(x=(xall_ptb,), method='CROWN') #'IBP')
