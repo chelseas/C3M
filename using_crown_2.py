@@ -122,7 +122,7 @@ class CertVerModel(nn.Module):
         self.W_func = W_func
         self.DfDx = system.DfDx_func
     def forward(self, xall):
-        print("xall.shape = ", xall.shape)
+        # print("xall.shape = ", xall.shape)
         x = xall[:,:num_dim_x]
         xref = xall[:,num_dim_x:num_dim_x*2]
         uref = xall[:,num_dim_x*2:]
@@ -141,11 +141,12 @@ class CertVerModel(nn.Module):
         # print("M.shape = ", M.shape)
         # print("x.shape = ", x.shape)
         # dMdx = JacobianOP.apply(M.reshape(bs, -1), x.reshape(bs, num_dim_x))
-        dMdx = JacobianOP.apply(M.reshape(bs, -1), x)
-        dMdx = dMdx.reshape(bs, -1, num_dim_x)
-        # print("dMdx.shape: ", dMdx.shape)
+        dMdx = JacobianOP.apply(M.reshape(bs, -1), x) # creates jac of shape (1,16,4,1)
+        # print("dMdx.shape 0: ", dMdx.shape)
+        dMdx = dMdx.reshape(bs, -1, num_dim_x) # remove trailing 1 dimension so it's (1,16,4)
+        # print("dMdx.shape 1: ", dMdx.shape)
         # print("dxdt.shape: ", dxdt.shape)
-        dMdt_flat = dMdx.matmul(dxdt)
+        dMdt_flat = dMdx.matmul(dxdt) # (1,16,4)x(1,4,1) should create (1,16,1)
         # print("dMdt_flat.shape: ", dMdt_flat.shape)
         # print("self.B,shape: ", self.B.shape)
         # print("K.shape: ", K.shape)
@@ -155,9 +156,12 @@ class CertVerModel(nn.Module):
                   + M_A_BK.transpose(1,2)
                   + 2 * lambda_ * M
         )
+        # print("Q.shape: ", Q.shape) # should be (bs, num_dim_x, num_dim_x)
         # compute Gershgorin approximation of eigen values
         diagonal_entries = torch.diagonal(Q, dim1=-2, dim2=-1)
+        # print("diagonal_entries.shape: ", diagonal_entries.shape)
         off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
+        # print("off_diagonal_sum.shape: ", off_diagonal_sum.shape)
         # Compute upper bounds on each eigenvalue of Q
         gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
         # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
