@@ -40,11 +40,13 @@ def weighted_gradients(W, v, x, detach=False):
     else:
         return (Jacobian_Matrix(W, x) * v.view(bs, 1, 1, -1)).sum(dim=3)
 
-def clean_unsupported_ops(model):
+def clean_unsupported_ops(model, replace="relu"):
     new_model = model
     for i, layer in enumerate(new_model):
         if layer._get_name() == "MixedTanh":
             #model[i] = torch.nn.Hardtanh()   # What we would like to do but can't. 
-            # OR perhaps torch.nn.Tanh()
-            new_model[i] = torch.nn.ReLU()
+            if replace == "tanh":
+                new_model[i] = torch.nn.Tanh()
+            elif replace == "relu":
+                new_model[i] = torch.nn.ReLU()
     return new_model

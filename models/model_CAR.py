@@ -8,6 +8,10 @@ effective_dim_end = 4
 
 INVERSE_METRIC = False
 
+use_mps = False
+# if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+#     torch.set_default_device('mps')
+#     use_mps = True
 
 class MixedTanh(nn.Module):
     def __init__(self):
@@ -158,6 +162,12 @@ def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0
         model_W = model_W.cuda()
         model_Wbot = model_Wbot.cuda()
         model_u_w1 = model_u_w1.cuda()
+    elif use_mps:
+        print("casting to mps")
+        model_W = model_W.to("mps")
+        print("check casting: ", model_W[0].weight.device)
+        model_Wbot = model_Wbot.to("mps")
+        model_u_w1 = model_u_w1.to("mps")
 
     u_func = U_FUNC(model_u_w1, num_dim_x, num_dim_control)
     W_func = W_FUNC(model_W, model_Wbot, num_dim_x, num_dim_control, w_lb)

@@ -2,8 +2,10 @@ import torch
 from torch.autograd import grad
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-# if torch.backends.mps.is_available():
+use_mps = False
+# if torch.backends.mps.is_available() and torch.backends.mps.is_built():
 #     torch.set_default_device('mps')
+#     use_mps = True
 
 import importlib
 import numpy as np
@@ -63,21 +65,24 @@ def cmdlineparse(args):
         help="Lower bound of the eigenvalue of the dual metric.",
     )
     parser.add_argument("--log", type=str, help="Path to a directory for storing the log.")
+    parser.add_argument("--clone", dest="clone", action="store_true", help="Flag to clone hardtanh or not.")
 
     args = parser.parse_args(args)
     return args
 
 def main(args=None):
     args = cmdlineparse(args)
-    os.system("cp *.py " + args.log)
-    os.system("cp -r models/ " + args.log)
-    os.system("cp -r configs/ " + args.log)
-    os.system("cp -r systems/ " + args.log)
-    writer = SummaryWriter(args.log + "/tb")
+    if not args.load_model:
+        os.system("cp *.py " + args.log)
+        os.system("cp -r models/ " + args.log)
+        os.system("cp -r configs/ " + args.log)
+        os.system("cp -r systems/ " + args.log)
+        writer = SummaryWriter(args.log + "/tb")
     global_steps = 0
 
     # epsilon = args._lambda
-    epsilon = 1.0
+    epsilon = 0.0
+    print("Epsilon: ", epsilon)
 
     config = importlib.import_module("config_" + args.task)
     X_MIN = config.X_MIN
@@ -111,6 +116,14 @@ def main(args=None):
         W_func_hard,
         u_func_hard,
     ) = get_model(num_dim_x, num_dim_control, w_lb=args.w_lb, use_cuda=args.use_cuda)
+
+    if use_mps:
+        print("casting to mps again")
+        model_W = model_W.to("mps")
+        model_Wbot = model_Wbot.to("mps")
+        model_u_w1 = model_u_w1.to("mps")
+        u_func = u_func.to("mps")
+        W_func = W_func.to("mps")
 
     # constructing datasets
     def sample_xef():
@@ -261,7 +274,9 @@ def main(args=None):
     def loss_pos_matrix_random_sampling(A):
         # A: bs x d x d
         # z: K x d
-        z = torch.randn(K, A.size(-1)).cuda()
+        z = torch.randn(K, A.size(-1))
+        if args.use_cuda:
+            z = z.cuda()
         z = z / z.norm(dim=1, keepdim=True)
         zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2).view(-1)
         negative_index = zTAz.detach().cpu().numpy() < 0
@@ -274,7 +289,7 @@ def main(args=None):
 
     def loss_pos_matrix_eigen_values(A):
         # A: bs x d x d
-        eigv = torch.symeig(A, eigenvectors=True)[0].view(-1)
+        eigv = torch.linalg.eigh(A, eigenvectors=True)[0].view(-1)
         negative_index = eigv.detach().cpu().numpy() < 0
         negative_eigv = eigv[negative_index]
         return negative_eigv.norm()
@@ -291,6 +306,8 @@ def main(args=None):
         clone=False,
         zero_order=False,
     ):
+        # print("W_func.device: ", W_func.model_W[0].weight.device)
+        # print("x.device: ", x.device)
         # Otherwise, just train the tanh networks
         # x: bs x n x 1
         bs = x.shape[0]
@@ -420,18 +437,18 @@ def main(args=None):
 
         if verbose:
             print(
-                torch.symeig(Contraction)[0].min(dim=1)[0].mean(),
-                torch.symeig(Contraction)[0].max(dim=1)[0].mean(),
-                torch.symeig(Contraction)[0].mean(),
+                torch.linalg.eigh(Contraction)[0].min(dim=1)[0].mean(),
+                torch.linalg.eigh(Contraction)[0].max(dim=1)[0].mean(),
+                torch.linalg.eigh(Contraction)[0].mean(),
             )
         if acc:
             return (
                 loss,
-                ((torch.symeig(Contraction)[0] >= 0).sum(dim=1) == 0)
+                ((torch.linalg.eigh(Contraction)[0] >= 0).sum(dim=1) == 0)
                 .cpu()
                 .detach()
                 .numpy(),
-                ((torch.symeig(C1_LHS_1)[0] >= 0).sum(dim=1) == 0).cpu().detach().numpy(),
+                ((torch.linalg.eigh(C1_LHS_1)[0] >= 0).sum(dim=1) == 0).cpu().detach().numpy(),
                 sum(
                     [1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s]
                 ).item(),
@@ -477,6 +494,7 @@ def main(args=None):
         total_l3 = 0
 
         if train:
+            # print("len(X):", len(X), ", bs: ", bs)
             _iter = tqdm(range(len(X) // bs))
         else:
             _iter = range(len(X) // bs)
@@ -490,6 +508,10 @@ def main(args=None):
                     x.append(torch.from_numpy(X[id][0]).float().cuda())
                     xref.append(torch.from_numpy(X[id][1]).float().cuda())
                     uref.append(torch.from_numpy(X[id][2]).float().cuda())
+                elif use_mps:
+                    x.append(torch.from_numpy(X[id][0]).float().to("mps"))
+                    xref.append(torch.from_numpy(X[id][1]).float().to("mps"))
+                    uref.append(torch.from_numpy(X[id][2]).float().to("mps"))
                 else:
                     x.append(torch.from_numpy(X[id][0]).float())
                     xref.append(torch.from_numpy(X[id][1]).float())
@@ -543,8 +565,8 @@ def main(args=None):
 
     if args.load_model:
         # load the metric and controller
-        filename_controller = args.log + "/controller_best_hardtanh.pth.tar"
-        filename_metric = args.log + "/metric_best_hardtanh.pth.tar"
+        filename_controller = args.log + "/controller_best.pth.tar"
+        filename_metric = args.log + "/metric_best.pth.tar"
         map_location = "cuda" if args.use_cuda else "cpu"
         W_func = torch.load(filename_metric, map_location)
         u_func = torch.load(filename_controller, map_location)
@@ -607,11 +629,13 @@ def main(args=None):
         )
 
         # Plot the maximum eigenvalue of the contraction condition
-        max_eig_Q = torch.symeig(Contraction)[0].max(dim=1)[0].detach()
+        max_eig_Q = torch.linalg.eigh(Contraction)[0].max(dim=1)[0].detach()
         violation = max_eig_Q > 0.0
         print("-------------")
         print(f"Total # violations: {violation.sum()} ({violation.sum() * 100 / N} %)")
-        print(f"mean violation: {max_eig_Q[violation].mean()} ({max_eig_Q[violation].max()} max)")
+        print("violation: ", violation)
+        if violation.any():
+            print(f"mean violation: {max_eig_Q[violation].mean()} ({max_eig_Q[violation].max()} max)")
         print("-------------")
         fig, axs = plt.subplots(4, 4)
         for i in range(4):
@@ -653,11 +677,11 @@ def main(args=None):
 
         # import seaborn as sns
 
-        # max_eig_M_dot = torch.symeig(dot_M)[0].view(-1).detach()
+        # max_eig_M_dot = torch.linalg.eigh(dot_M)[0].view(-1).detach()
         # MABK = (A + B.matmul(K)).transpose(1, 2).matmul(M) + M.matmul(A + B.matmul(K))
-        # max_eig_MABK = torch.symeig(MABK)[0].view(-1).detach()
-        # max_eig_M = torch.symeig(2 * _lambda * M)[0].view(-1).detach()
-        # max_eig_Q = torch.symeig(Contraction)[0].view(-1).detach()
+        # max_eig_MABK = torch.linalg.eigh(MABK)[0].view(-1).detach()
+        # max_eig_M = torch.linalg.eigh(2 * _lambda * M)[0].view(-1).detach()
+        # max_eig_Q = torch.linalg.eigh(Contraction)[0].view(-1).detach()
 
         # _, axs = plt.subplots(1, 3)
         # sns.histplot(x=max_eig_M_dot, ax=axs[0])
@@ -715,54 +739,54 @@ def main(args=None):
 
         writer.close()
 
-
-    # Once that's trained, train a hardtanh network to imitate it
-    print("------------ Initial training done; transferring to hardtanh ------------")
-    best_acc = 0
-    args.learning_rate = 0.01
-    for epoch in range(args.epochs):
-        adjust_learning_rate(hardtanh_optimizer, epoch)
-        loss, _, _, _ = trainval(
-            X_tr,
-            train=True,
-            _lambda=args._lambda,
-            acc=False,
-            detach=False,
-            clone=True,
-        )
-        print("Training loss: ", loss)
-        loss, p1, p2, l3 = trainval(
-            X_te, train=False, _lambda=0.0, acc=True, detach=False, clone=True
-        )
-        print("Epoch %d: Testing loss/p1/p2/l3: " % epoch, loss, p1, p2, l3)
-
-        writer.add_scalar("Loss", loss, epoch + args.epochs)
-        writer.add_scalar("% of pts with max eig Q < 0", p1, epoch + args.epochs)
-        writer.add_scalar("% of pts with max eig C1_LHS < 0", p2, epoch + args.epochs)
-        writer.add_scalar("mean C2^2", l3, epoch + args.epochs)
-
-        if p1 + p2 >= best_acc:
-            best_acc = p1 + p2
-            filename = args.log + "/model_best_hardtanh.pth.tar"
-            filename_controller = args.log + "/controller_best_hardtanh.pth.tar"
-            filename_metric = args.log + "/metric_best_hardtanh.pth.tar"
-            torch.save(
-                {
-                    "args": args,
-                    "precs": (loss, p1, p2),
-                    "model_W": model_W.state_dict(),
-                    "model_Wbot": model_Wbot.state_dict(),
-                    "model_u_w1": model_u_w1.state_dict(),
-                    "model_W_hard": model_W_hard.state_dict(),
-                    "model_Wbot_hard": model_Wbot_hard.state_dict(),
-                    "model_u_w1_hard": model_u_w1_hard.state_dict(),
-                },
-                filename,
+    if args.clone:
+        # Once that's trained, train a hardtanh network to imitate it
+        print("------------ Initial training done; transferring to hardtanh ------------")
+        best_acc = 0
+        args.learning_rate = 0.01
+        for epoch in range(args.epochs):
+            adjust_learning_rate(hardtanh_optimizer, epoch)
+            loss, _, _, _ = trainval(
+                X_tr,
+                train=True,
+                _lambda=args._lambda,
+                acc=False,
+                detach=False,
+                clone=True,
             )
-            torch.save(u_func_hard, filename_controller)
-            torch.save(W_func_hard, filename_metric)
+            print("Training loss: ", loss)
+            loss, p1, p2, l3 = trainval(
+                X_te, train=False, _lambda=0.0, acc=True, detach=False, clone=True
+            )
+            print("Epoch %d: Testing loss/p1/p2/l3: " % epoch, loss, p1, p2, l3)
 
-        writer.close()
+            writer.add_scalar("Loss", loss, epoch + args.epochs)
+            writer.add_scalar("% of pts with max eig Q < 0", p1, epoch + args.epochs)
+            writer.add_scalar("% of pts with max eig C1_LHS < 0", p2, epoch + args.epochs)
+            writer.add_scalar("mean C2^2", l3, epoch + args.epochs)
+
+            if p1 + p2 >= best_acc:
+                best_acc = p1 + p2
+                filename = args.log + "/model_best_hardtanh.pth.tar"
+                filename_controller = args.log + "/controller_best_hardtanh.pth.tar"
+                filename_metric = args.log + "/metric_best_hardtanh.pth.tar"
+                torch.save(
+                    {
+                        "args": args,
+                        "precs": (loss, p1, p2),
+                        "model_W": model_W.state_dict(),
+                        "model_Wbot": model_Wbot.state_dict(),
+                        "model_u_w1": model_u_w1.state_dict(),
+                        "model_W_hard": model_W_hard.state_dict(),
+                        "model_Wbot_hard": model_Wbot_hard.state_dict(),
+                        "model_u_w1_hard": model_u_w1_hard.state_dict(),
+                    },
+                    filename,
+                )
+                torch.save(u_func_hard, filename_controller)
+                torch.save(W_func_hard, filename_metric)
+
+            writer.close()
 
 if __name__ == '__main__':
     main()
