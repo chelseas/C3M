@@ -25,14 +25,17 @@ from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients, cle
 # load the metric and controller
 use_hardtanh = False
 if use_hardtanh:
+    print("loading hardtanh models")
     filename_controller = log + "/controller_best_hardtanh.pth.tar"
     filename_metric = log + "/metric_best_hardtanh.pth.tar"
     mixing=1.0 # all hardtanh
+    filename_model = log + "/model_best_hardtanh.pth.tar" # only used for loading w_lb
 else:
+    print("loading smooth tanh models")
     filename_controller = log + "/controller_best.pth.tar"
     filename_metric = log + "/metric_best.pth.tar"
     mixing=0.0 # all tanh
-filename_model = log + "/model_best_hardtanh.pth.tar"
+    filename_model = log + "/model_best.pth.tar" # only used for loading w_lb
 # if torch.backends.mps.is_available():
 #     map_location = "mps"
 #     torch.set_default_device('mps') # buggy when casting tensors to mps types
@@ -84,10 +87,12 @@ ptb = PerturbationLpNorm(norm = norm, eps = eps)
 x_ptb = BoundedTensor(x, ptb)
 xall_ptb = BoundedTensor(xall, ptb)
 
-def create_clean_Wu_funcs():
+def create_clean_Wu_funcs(replace="relu"):
+    print("replacing unsupported ops with: ", replace)
     # load model dict to get params
     trained_model = torch.load(filename_model, map_location)
     w_lb = trained_model['args'].w_lb
+    print("w_lb = ", w_lb)
     # load saved weights
     W_func_loaded = torch.load(filename_metric, map_location)
     u_func_loaded = torch.load(filename_controller, map_location)
@@ -97,27 +102,19 @@ def create_clean_Wu_funcs():
     W_func.load_state_dict(W_func_loaded.state_dict())
     u_func.load_state_dict(u_func_loaded.state_dict())
     # return modified W_func
-    W_func.model_W = clean_unsupported_ops(W_func.model_W)
-    W_func.model_Wbot = clean_unsupported_ops(W_func.model_Wbot)
-    u_func.model_u_w1 = clean_unsupported_ops(u_func.model_u_w1)
+    W_func.model_W = clean_unsupported_ops(W_func.model_W, replace=replace)
+    W_func.model_Wbot = clean_unsupported_ops(W_func.model_Wbot, replace=replace)
+    u_func.model_u_w1 = clean_unsupported_ops(u_func.model_u_w1, replace=replace)
     return W_func, u_func
 
-# # test ufunc
-# _, ufunc_test = create_clean_Wu_funcs()
-# print("testing ufunc ~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-# print("u_func(x): ", ufunc_test(x, xerr, uref))
-# print("testing ufunc over ~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-
-# assert 1== 0
-
 class CertVerModel(nn.Module):
-    def __init__(self, x):
+    def __init__(self, x, replace="relu"):
         super(CertVerModel, self).__init__()
         #clean upsupported ops
         self.f_func = f_func
         self.B = B_func(x) # init const with correct batch size
         self.DBDx_x = system.DBDx_func(x)
-        W_func, u_func = create_clean_Wu_funcs()
+        W_func, u_func = create_clean_Wu_funcs(replace=replace)
         self.u_func = u_func
         self.W_func = W_func
         self.DfDx = system.DfDx_func
@@ -139,10 +136,10 @@ class CertVerModel(nn.Module):
         # print("dxdt.shape: ", dxdt.shape)
         M = self.W_func(x)
         # print("M.shape = ", M.shape)
-        # print("x.shape = ", x.shape)
+        print("x.shape = ", x.shape)
         # dMdx = JacobianOP.apply(M.reshape(bs, -1), x.reshape(bs, num_dim_x))
         dMdx = JacobianOP.apply(M.reshape(bs, -1), x) # creates jac of shape (1,16,4,1)
-        # print("dMdx.shape 0: ", dMdx.shape)
+        print("dMdx.shape 0: ", dMdx.shape)
         dMdx = dMdx.reshape(bs, -1, num_dim_x) # remove trailing 1 dimension so it's (1,16,4)
         # print("dMdx.shape 1: ", dMdx.shape)
         # print("dxdt.shape: ", dxdt.shape)
@@ -167,9 +164,77 @@ class CertVerModel(nn.Module):
         # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
         return gersh_ub_eig_Q
 
-certvermodel = CertVerModel(xall)
+class CertVerComparison(nn.Module):
+    def __init__(self, x, replace="relu"):
+        super(CertVerComparison, self).__init__()
+        #clean upsupported ops
+        self.f_func = f_func
+        self.B = B_func(x) # init const with correct batch size
+        self.DBDx_x = system.DBDx_func(x)
+        W_func, u_func = create_clean_Wu_funcs(replace=replace)
+        self.u_func = u_func
+        self.W_func = W_func
+        self.DfDx = system.DfDx_func
+    def forward(self, xall):
+        # print("xall.shape = ", xall.shape)
+        x = xall[:,:num_dim_x]
+        xref = xall[:,num_dim_x:num_dim_x*2]
+        uref = xall[:,num_dim_x*2:]
+        xerr = x - xref
+        def get_u(x):
+            u = self.u_func(x.requires_grad_(True), 
+                            xerr.requires_grad_(True), 
+                            uref.requires_grad_(True))
+            return u
+        K = torch.autograd.functional.jacobian(get_u, x).reshape(bs, num_dim_control, num_dim_x)
+        u = get_u(x)
+        A = self.DfDx(x) + (u.reshape(bs, 1, 1, num_dim_control)*self.DBDx_x).sum(dim=-1)
+        # print("A.shape: ", A.shape)
+        # print("self.f_func(x).shape =", self.f_func(x).shape)
+        # print("self.B.shape =", self.B.shape)
+        # print("u.shape =", u.shape)
+        # print("self.B.matmul(u).shape =", self.B.matmul(u).shape)
+        dxdt = self.f_func(x).reshape(bs, num_dim_x, 1) + self.B.matmul(u)
+        # print("dxdt.shape: ", dxdt.shape)
+        def get_M(x):
+            M = self.W_func(x.requires_grad_(True))
+            return M.reshape(bs, -1) 
+        M = get_M(x).reshape(bs, num_dim_x, num_dim_x)
+        # print("M.shape = ", M.shape)
+        # print("x.shape = ", x.shape)
+        # dMdx = JacobianOP.apply(M.reshape(bs, -1), x.reshape(bs, num_dim_x))
+        dMdx = torch.autograd.functional.jacobian(get_M, x).reshape(bs, num_dim_x**2, num_dim_x) # creates jac of shape (1,16,4)
+        # print("dMdx.shape 1: ", dMdx.shape)
+        # print("dxdt.shape: ", dxdt.shape)
+        dMdt_flat = dMdx.matmul(dxdt) # (1,16,4)x(1,4,1) should create (1,16,1)
+        # print("dMdt_flat.shape: ", dMdt_flat.shape)
+        # print("self.B,shape: ", self.B.shape)
+        # print("K.shape: ", K.shape)
+        dMdt = dMdt_flat.reshape(bs, num_dim_x, num_dim_x)
+        M_A_BK = M.matmul( A + self.B.matmul(K) )
+        Q = (dMdt + M_A_BK
+                  + M_A_BK.transpose(1,2)
+                  + 2 * lambda_ * M
+        )
+        # print("Q.shape: ", Q.shape) # should be (bs, num_dim_x, num_dim_x)
+        # compute Gershgorin approximation of eigen values
+        diagonal_entries = torch.diagonal(Q, dim1=-2, dim2=-1)
+        # print("diagonal_entries.shape: ", diagonal_entries.shape)
+        off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
+        # print("off_diagonal_sum.shape: ", off_diagonal_sum.shape)
+        # Compute upper bounds on each eigenvalue of Q
+        gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
+        # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
+        return gersh_ub_eig_Q
+
+certvermodel = CertVerModel(xall, replace="relu")
+certvermodel_comparison = CertVerComparison(xall, replace="relu")
+print("crown: ")
 out = certvermodel(xall)
+print("using autograd:")
+out_c = certvermodel_comparison(xall)
 print(f"out: {out}")
+print(f"out_c : {out_c}")
 # g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref, "maxeigQ": out})
 # g.view()
 print("trying to build CROWN graph ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~`")
