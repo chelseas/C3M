@@ -9,7 +9,7 @@ effective_dim_end = 4
 INVERSE_METRIC = False
 
 use_mps = False
-device = 'cpu'
+# device = 'cpu'
 # if torch.backends.mps.is_available() and torch.backends.mps.is_built():
 #     torch.set_default_device('mps')
 #     use_mps = True
@@ -43,11 +43,11 @@ class U_FUNC(nn.Module):
         # u: B x m x 1
         bs = x.shape[0]
 
-        w1_xe = self.model_u_w1(torch.cat([x, xe], dim=1).squeeze(-1)).reshape(
+        w1_xe = self.model_u_w1(torch.cat([x[:, effective_dim_start:effective_dim_end], xe], dim=1).squeeze(-1)).reshape(
             bs, self.num_dim_control, -1
         )
         w1_x0 = self.model_u_w1(
-            torch.cat([x, torch.zeros(xe.shape).type(xe.type())], dim=1).squeeze(-1)
+            torch.cat([x[:, effective_dim_start:effective_dim_end], torch.zeros_like(xe)], dim=1).squeeze(-1)
         ).reshape(bs, self.num_dim_control, -1)
         u = w1_xe - w1_x0 + uref
         return u
@@ -81,7 +81,7 @@ class W_FUNC(nn.Module):
         W = self.model_W(x[:, effective_dim_start:effective_dim_end]).view(
             bs, self.num_dim_x, self.num_dim_x
         )
-        Wbot = self.model_Wbot(torch.ones(bs, 1).type(x.type())).view(
+        Wbot = self.model_Wbot(torch.ones(bs, 1).type(x.dtype)).view(
             bs,
             self.num_dim_x - self.num_dim_control,
             self.num_dim_x - self.num_dim_control,
@@ -102,7 +102,7 @@ class W_FUNC(nn.Module):
         W = W.transpose(1, 2).matmul(W)
         W = W + self.w_lb * torch.eye(self.num_dim_x).view(
             1, self.num_dim_x, self.num_dim_x
-        ).type(x.type())
+        ).type(x.dtype)
         return W
 
     def convert_to_hardtanh(self):
@@ -154,11 +154,12 @@ def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0
     W_layers.append(torch.nn.Linear(M_width, num_dim_x * num_dim_x, bias=False))
     model_W = torch.nn.Sequential(*W_layers)
 
-    u_layers = [torch.nn.Linear(2 * num_dim_x, u_width, bias=False), MixedTanh()]
+    u_layers = [torch.nn.Linear(dim + num_dim_x, u_width, bias=False), MixedTanh()]
     for i in range(u_depth - 1):
         u_layers += [torch.nn.Linear(u_width, u_width, bias=False), MixedTanh()]
     u_layers.append(torch.nn.Linear(u_width, num_dim_control, bias=False))
     model_u_w1 = torch.nn.Sequential(*u_layers)
+    print("Input dimension of control network: ", model_u_w1[0].weight.shape)
 
     if use_cuda:
         model_W = model_W.cuda()
