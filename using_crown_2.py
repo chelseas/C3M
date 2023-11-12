@@ -180,14 +180,16 @@ class CertVerComparison(nn.Module):
         x = xall[:,:num_dim_x]
         xref = xall[:,num_dim_x:num_dim_x*2]
         uref = xall[:,num_dim_x*2:]
-        xerr = x - xref
-        def get_u(x):
+        def get_u(x, xref, uref):
+            xerr = x - xref
             u = self.u_func(x.requires_grad_(True),
                             xerr.requires_grad_(True),
                             uref.requires_grad_(True))
             return u
-        K = torch.autograd.functional.jacobian(get_u, x, create_graph=True).reshape(bs, num_dim_control, num_dim_x)
-        u = get_u(x)
+        K = torch.autograd.functional.jacobian(
+            get_u, (x, xref, uref), create_graph=True
+        )[0].reshape(bs, num_dim_control, num_dim_x)
+        u = get_u(x, xref, uref)
         A = self.DfDx(x) + (u.reshape(bs, 1, 1, num_dim_control)*self.DBDx_x).sum(dim=-1)
         # print("A.shape: ", A.shape)
         # print("self.f_func(x).shape =", self.f_func(x).shape)
