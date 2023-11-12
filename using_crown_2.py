@@ -182,8 +182,8 @@ class CertVerComparison(nn.Module):
         uref = xall[:,num_dim_x*2:]
         xerr = x - xref
         def get_u(x):
-            u = self.u_func(x.requires_grad_(True), 
-                            xerr.requires_grad_(True), 
+            u = self.u_func(x.requires_grad_(True),
+                            xerr.requires_grad_(True),
                             uref.requires_grad_(True))
             return u
         K = torch.autograd.functional.jacobian(get_u, x, create_graph=True).reshape(bs, num_dim_control, num_dim_x)
@@ -198,7 +198,7 @@ class CertVerComparison(nn.Module):
         # print("dxdt.shape: ", dxdt.shape)
         def get_M(x):
             M = self.W_func(x.requires_grad_(True))
-            return M.reshape(bs, -1) 
+            return M.reshape(bs, -1)
         M = get_M(x).reshape(bs, num_dim_x, num_dim_x)
         # print("M.shape = ", M.shape)
         # print("x.shape = ", x.shape)
@@ -227,8 +227,8 @@ class CertVerComparison(nn.Module):
         # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
         return gersh_ub_eig_Q
 
-certvermodel = CertVerModel(xall, replace="relu")
-certvermodel_comparison = CertVerComparison(xall, replace="relu")
+certvermodel = CertVerModel(xall, replace="tanh")
+certvermodel_comparison = CertVerComparison(xall, replace="tanh")
 print("crown: ")
 out = certvermodel(xall)
 print("using autograd:")
