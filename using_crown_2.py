@@ -16,7 +16,8 @@ sys.path.append("../C3M/configs")
 sys.path.append("../C3M/models")
 sys.path.append("../C3M")
 # options
-log = "../C3M/saved_models/Y_eps0p0"
+# log = "../C3M/saved_models/Y_eps0p0"
+log = "../C3M/logs/car_red_2"
 use_cuda = False
 task = "CARcrown"
 from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients, clean_unsupported_ops

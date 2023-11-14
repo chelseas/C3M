@@ -8,6 +8,14 @@ effective_dim_end = 4
 
 INVERSE_METRIC = False
 
+use_mps = False
+# device = 'cpu'
+# if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+#     torch.set_default_device('mps')
+#     use_mps = True
+#     device = 'mps'
+# whether or not to use translation invariance in controller
+contr_tvdim = True
 
 class MixedTanh(nn.Module):
     def __init__(self):
@@ -36,12 +44,18 @@ class U_FUNC(nn.Module):
         # x: B x n x 1
         # u: B x m x 1
         bs = x.shape[0]
-        print("input shape: ", torch.cat([x, xe], dim=1).reshape(bs, -1).shape)
-        w1_xe = self.model_u_w1(torch.cat([x, xe], dim=1).reshape(bs, -1)).reshape(
+        if contr_tvdim:
+            d1 = effective_dim_start
+            d2 = effective_dim_end
+        else: # use whole x
+            d1 = 0
+            d2 = self.num_dim_x
+        print("input shape: ", torch.cat([x[:, d1:d2], xe], dim=1).reshape(bs, -1).shape)
+        w1_xe = self.model_u_w1(torch.cat([x[:, d1:d2], xe], dim=1).reshape(bs, -1)).reshape(
             bs, self.num_dim_control, -1
         )
         w1_x0 = self.model_u_w1(
-            torch.cat([x, torch.zeros_like(xe)], dim=1).reshape(bs, -1)
+            torch.cat([x[:, d1:d2], torch.zeros_like(xe)], dim=1).reshape(bs, -1)
         ).reshape(bs, self.num_dim_control, -1)
         u = w1_xe - w1_x0 + uref
         return u
@@ -78,7 +92,7 @@ class W_FUNC(nn.Module):
         # print("W.shape: ", W.shape)
         W_right = W[:, :, (self.num_dim_x - self.num_dim_control):]
 
-        Wbot = self.model_Wbot(torch.ones(bs, 1).type(x.type())).view(
+        Wbot = self.model_Wbot(torch.ones(bs, 1).type(x.dtype)).view(
             bs,
             self.num_dim_x - self.num_dim_control,
             self.num_dim_x - self.num_dim_control,
@@ -90,7 +104,7 @@ class W_FUNC(nn.Module):
 
         W_final = W_full.transpose(1, 2).matmul(W_full)
         print("0. W_final.shape = :", W_final.shape)
-        W_final = W_final + self.w_lb * torch.eye(self.num_dim_x).repeat(bs,1,1).type(x.type())
+        W_final = W_final + self.w_lb * torch.eye(self.num_dim_x).repeat(bs,1,1).type(x.dtype)
         return W
 
     def convert_to_hardtanh(self):
@@ -142,7 +156,11 @@ def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0
     W_layers.append(torch.nn.Linear(M_width, num_dim_x * num_dim_x, bias=False))
     model_W = torch.nn.Sequential(*W_layers)
 
-    u_layers = [torch.nn.Linear(2 * num_dim_x, u_width, bias=False), MixedTanh()]
+    if contr_tvdim:
+        u_size = dim + num_dim_x
+    else:
+        u_size = num_dim_x*2
+    u_layers = [torch.nn.Linear(u_size, u_width, bias=False), MixedTanh()]
     for i in range(u_depth - 1):
         u_layers += [torch.nn.Linear(u_width, u_width, bias=False), MixedTanh()]
     u_layers.append(torch.nn.Linear(u_width, num_dim_control, bias=False))
@@ -152,6 +170,12 @@ def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0
         model_W = model_W.cuda()
         model_Wbot = model_Wbot.cuda()
         model_u_w1 = model_u_w1.cuda()
+    elif use_mps:
+        print("casting to mps")
+        model_W = model_W.to("mps")
+        print("check casting: ", model_W[0].weight.device)
+        model_Wbot = model_Wbot.to("mps")
+        model_u_w1 = model_u_w1.to("mps")
 
     u_func = U_FUNC(model_u_w1, num_dim_x, num_dim_control)
     W_func = W_FUNC(model_W, model_Wbot, num_dim_x, num_dim_control, w_lb)
