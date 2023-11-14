@@ -14,7 +14,7 @@ def f_func(x):
     f = torch.stack([v * torch.cos(theta), 
                      v * torch.sin(theta),
                      torch.zeros_like(v),
-                     torch.zeros_like(v),], dim=1).type(x.type()) #.reshape(bs, num_dim_x, 1)
+                     torch.zeros_like(v),], dim=1).type(x.dtype).reshape(bs, num_dim_x, 1)
     # print(f"f.shape: {f.shape}")
     # print("inside car f_func")
     return f
@@ -38,8 +38,8 @@ def DfDx_func(x):
 
 def B_func(x):
     bs = x.shape[0]
-    B_top = torch.zeros(bs, 2, 2).type(x.type())
-    B_bot = torch.eye(2).repeat(bs,1,1).type(x.type()) # I think this is giving "tile op not supported" error *facepalm of exhaustion*
+    B_top = torch.zeros(bs, 2, 2).type(x.dtype)
+    B_bot = torch.eye(2).repeat(bs,1,1).type(x.dtype) # I think this is giving "tile op not supported" error *facepalm of exhaustion*
     # print("B_top.shape = ", B_top.shape)
     # print("B_bot.shape = ", B_bot.shape)
     B = torch.concat([B_top, B_bot], dim=1)
