@@ -66,6 +66,38 @@ def cmdlineparse(args):
     )
     parser.add_argument("--log", type=str, help="Path to a directory for storing the log.")
     parser.add_argument("--clone", dest="clone", action="store_true", help="Flag to clone hardtanh or not.")
+    parser.add_argument(
+        "--robust_train",
+        dest="robust_train",
+        action="store_true",
+        help="Do adversarial training using PGD attack.",
+    )
+    parser.add_argument(
+        "--robust_eps",
+        type=float,
+        default=0.3,
+        help="Perturbation bound for adversarial training.",
+    )
+    parser.add_argument(
+        "--robust_alpha",
+        type=float,
+        default=2.0,
+        help="Learning rate for adversarial training attack.",
+    )
+    parser.add_argument(
+        "--robust_norm",
+        type=str,
+        default="l_inf",
+        help="Norm for adversarial training.",
+    )
+    parser.add_argument(
+        "--robust_attack_iters",
+        type=int,
+        default=10,
+        help="Number of iterations to create adversarial example during robust training.",
+    )
+    parser.add_argument(
+        '--robust_restarts',   default=1, type=int, help=" number of times that the adversarial attack can restart during adversarial training. A hyper parameter.")
 
     args = parser.parse_args(args)
     return args
@@ -91,6 +123,10 @@ def main(args=None):
     U_MAX = config.UREF_MAX
     XE_MIN = config.XE_MIN
     XE_MAX = config.XE_MAX
+    low = np.concatenate([X_MIN, X_MIN, U_MIN]).reshape(-1,1)
+    high = np.concatenate([X_MAX, X_MAX, U_MAX]).reshape(-1,1)
+    ranges = torch.tensor(np.hstack([low, high])).reshape(-1,2)
+    print("ranges: ", ranges)
 
     system = importlib.import_module("system_" + args.task)
     f_func = system.f_func
@@ -190,13 +226,13 @@ def main(args=None):
         x = torch.repeat_interleave(x, gradient_bundle_size, dim=-1)
 
         # Make somewhere to store the Jacobian
-        J = torch.zeros(*f_x.squeeze().shape, n).type(x.type())
+        J = torch.zeros(*f_x.squeeze().shape, n).type(x.dtype)
 
         # Estimate the gradient in each direction of x
         for i in range(n):
             # Get the perturbations in this dimension of x
             dx_i = gradient_bundle_variance * torch.randn(gradient_bundle_size).type(
-                x.type()
+                x.dtype
             )
             x_plus_dx_i = x.clone()
             x_plus_dx_i[:, i, :] += dx_i
@@ -222,7 +258,7 @@ def main(args=None):
         bs = x.shape[0]
         m = M.size(-1)
         n = x.size(1)
-        J = torch.zeros(bs, m, m, n).type(x.type())
+        J = torch.zeros(bs, m, m, n).type(x.dtype)
         for i in range(m):
             for j in range(m):
                 J[:, i, j, :] = grad(M[:, i, j].sum(), x, create_graph=True)[0].squeeze(-1)
@@ -238,7 +274,7 @@ def main(args=None):
         bs = x.shape[0]
         m = f.size(1)
         n = x.size(1)
-        J = torch.zeros(bs, m, n).type(x.type())
+        J = torch.zeros(bs, m, n).type(x.dtype)
         for i in range(m):
             J[:, i, :] = grad(f[:, i, 0].sum(), x, create_graph=True)[0].squeeze(-1)
         return J
@@ -271,20 +307,49 @@ def main(args=None):
     K = 1024
 
 
-    def loss_pos_matrix_random_sampling(A):
+    # def loss_pos_matrix_random_sampling(A):
+    #     # A: bs x d x d
+    #     # z: K x d
+    #     z = torch.randn(K, A.size(-1))
+    #     if args.use_cuda:
+    #         z = z.cuda()
+    #     z = z / z.norm(dim=1, keepdim=True)
+    #     zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2).view(-1)
+    #     negative_index = zTAz.detach().cpu().numpy() < 0
+    #     if negative_index.sum() > 0:
+    #         negative_zTAz = zTAz[negative_index]
+    #         return -1.0 * (negative_zTAz.mean())
+    #     else:
+    #         return torch.tensor(0.0).type(z.type()).requires_grad_()
+        
+    def loss_pos_matrix_random_sampling(A, reduce=True):
         # A: bs x d x d
         # z: K x d
         z = torch.randn(K, A.size(-1))
         if args.use_cuda:
             z = z.cuda()
         z = z / z.norm(dim=1, keepdim=True)
-        zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2).view(-1)
-        negative_index = zTAz.detach().cpu().numpy() < 0
-        if negative_index.sum() > 0:
-            negative_zTAz = zTAz[negative_index]
-            return -1.0 * (negative_zTAz.mean())
-        else:
-            return torch.tensor(0.0).type(z.type()).requires_grad_()
+        zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2) # bs x K
+        if reduce:
+            zTAz = zTAz.view(-1)
+            negative_index = zTAz.detach().cpu().numpy() < 0
+            if negative_index.sum() > 0:
+                negative_zTAz = zTAz[negative_index]
+                return -1.0 * (negative_zTAz.mean())
+            else:
+                return torch.tensor(0.0).type(z.dtype).requires_grad_()
+        else: # no reduce
+            # compute avg violation of PD condition for each sample in batch
+            positive_index = zTAz.detach().cpu().numpy() > 0
+            negative_index = zTAz.cpu().numpy() < 0
+            # no loss contrib from pos so zero them
+            zTAz[positive_index] = 0.
+            # next average neg values
+            num_neg_each_row = negative_index.sum(-1) # if this is zero for any data point, don't want to divide by zero
+            num_neg_each_row[num_neg_each_row == 0.0] = 1.0 # 0/1 = 0
+            neg_mean = zTAz.sum(dim=-1) / num_neg_each_row 
+            print("loss dim: ", neg_mean.shape)
+            return -1.0 * neg_mean
 
 
     def loss_pos_matrix_eigen_values(A):
@@ -305,6 +370,7 @@ def main(args=None):
         detach=False,
         clone=False,
         zero_order=False,
+        reduce=True
     ):
         # print("W_func.device: ", W_func.model_W[0].weight.device)
         # print("x.device: ", x.device)
@@ -320,7 +386,7 @@ def main(args=None):
         f = f_func(x)
         B = B_func(x)
         DfDx = Jacobian(f, x)
-        DBDx = torch.zeros(bs, num_dim_x, num_dim_x, num_dim_control).type(x.type())
+        DBDx = torch.zeros(bs, num_dim_x, num_dim_x, num_dim_control).type(x.dtype)
         for i in range(num_dim_control):
             DBDx[:, :, :, i] = Jacobian(B[:, :, i].unsqueeze(-1), x)
 
@@ -417,19 +483,31 @@ def main(args=None):
             C2_inners.append(C2_inner)
             C2s.append(C2)
 
-        loss = 0
+        if reduce:
+            # compute a scalar loss
+            loss = 0
+        else:
+            # compute a loss value for every data point in batch
+            loss = torch.zeros(x.shape[0])
         loss += loss_pos_matrix_random_sampling(
             -Contraction
-            - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.type())
+            - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
+            reduce=reduce
         )
         loss += loss_pos_matrix_random_sampling(
-            -C1_LHS_1 - epsilon * torch.eye(C1_LHS_1.shape[-1]).unsqueeze(0).type(x.type())
+            -C1_LHS_1 - epsilon * torch.eye(C1_LHS_1.shape[-1]).unsqueeze(0).type(x.dtype),
+            reduce=reduce
         )
         loss += loss_pos_matrix_random_sampling(
-            args.w_ub * torch.eye(W.shape[-1]).unsqueeze(0).type(x.type()) - W
+            args.w_ub * torch.eye(W.shape[-1]).unsqueeze(0).type(x.dtype) - W,
+            reduce=reduce
         )
-        # loss += loss_pos_matrix_random_sampling(W - args.w_lb * torch.eye(W.shape[-1]).unsqueeze(0).type(x.type()))  # Make sure W is positive definite
-        loss += 1.0 * sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s])
+        # loss += loss_pos_matrix_random_sampling(W - args.w_lb * torch.eye(W.shape[-1]).unsqueeze(0).type(x.dtype))  # Make sure W is positive definite
+        if reduce:
+            loss += 1.0 * sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s])
+        else:
+            assert(len(sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1) for C2 in C2s])) == bs)
+            loss += 1.0 * sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1) for C2 in C2s])
 
         if clone:
             overall_clone_loss = u_error.mean() + M_error.mean() + W_error.mean()
@@ -470,6 +548,201 @@ def main(args=None):
         + list(model_u_w1_hard.parameters()),
         lr=args.learning_rate,
     )
+
+    def attack_pgd(X,
+                   robust_eps,
+                   ranges,
+                   alpha, 
+                   attack_iters,
+                   restarts,
+                   norm,
+                   train,
+                   acc,
+                   detach,
+                   clone):
+        """
+        This function calculates one batch of adversarial inputs using a PGD attack.
+        """
+        #  keep track of most adversarial input found so far for each training example
+        max_loss = torch.zeros(X.shape[0])
+        max_delta = torch.zeros_like(X)
+        if args.use_cuda:
+            max_loss.cuda()
+            max_delta.cuda()
+        # ranges is a matrix that looks like [[-1,1], [1,2],...] Containing the available ranges for each state variable
+        low = ranges[:,0].reshape(1, -1)
+        high = ranges[:,1].reshape(1, -1)
+        Xrange = high - low
+        for _ in range(restarts):
+            # Initialize deltas to uniform random in 2*eps*range of each variable centered at center of range
+            delta = torch.zeros_like(X)
+            delta.uniform_(-robust_eps, robust_eps)
+            delta = delta*(Xrange) + (low+high)/2
+            assert(delta > low and delta < high) #  sanity check instead of clamp
+            delta.requires_grad = True
+            # optimize the deltas
+            for _ in range(attack_iters):
+                # compute the perturbed inputs
+                ptbd_X = torch.clamp(X + delta, min=low, max=high)
+                x_ptb = ptbd_X[:,0:num_dim_x]
+                xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)]
+                uref_ptb = ptbd_X[:, (2*num_dim_x):]
+                # compute the loss
+                loss, p1, p2, l3 = forward( #  this computes a scaler loss
+                    x_ptb,
+                    xref_ptb,
+                    uref_ptb,
+                    _lambda=_lambda,
+                    verbose=False if not train else False,
+                    acc=acc,
+                    detach=detach,
+                    clone=clone,
+                    zero_order=False,
+                )
+                # compute gradients
+                loss.backward()
+                grad = delta.grad.detach()
+                d = delta
+                g = grad
+                if norm == "l_inf":
+                    # Do gradient ascent on the disturbance delta (d)
+                    d = d + alpha * torch.sign(g)
+                    # clamp to limited disturbance range
+                    d = torch.clamp(d, min=-robust_eps*Xrange, max=robust_eps*Xrange)
+                elif norm == "l_2":
+                    raise NotImplementedError
+                    # g_norm = torch.norm(g.view(g.shape[0],-1),dim=1).view(-1,1,1,1)
+                    # scaled_g = g/(g_norm + 1e-10)
+                    # d = (d + scaled_g*alpha).view(d.size(0),-1).renorm(p=2,dim=0,maxnorm=epsilon).view_as(d)
+                d = torch.clamp(d, low, high) # probably unecessary?
+                delta = d 
+                # reset gradient before next iter
+                delta.grad.zero_()
+            #  here we compute a loss value for each example in the batch
+            # compute the perturbed inputs
+            ptbd_X = torch.clamp(X + delta, min=low, max=high)
+            x_ptb = ptbd_X[:,0:num_dim_x]
+            xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)]
+            uref_ptb = ptbd_X[:, (2*num_dim_x):]
+            # compute the loss
+            batch_loss, p1, p2, l3 = forward( #  this computes a scaler loss
+                x_ptb,
+                xref_ptb,
+                uref_ptb,
+                _lambda=_lambda,
+                verbose=False if not train else False,
+                acc=acc,
+                detach=detach,
+                clone=clone,
+                zero_order=False,
+                reduce=False # key to computing loss value for every example in the batch
+            )
+            # store largest delta values
+            max_delta[batch_loss >= max_loss] = delta.detach()[batch_loss >= max_loss]
+            max_loss = torch.max(max_loss, batch_loss)
+        return max_delta
+
+    def robust_trainval(
+        X,
+        bs=args.bs,
+        train=True,
+        _lambda=args._lambda,
+        acc=False,
+        detach=False,
+        clone=False,
+    ):  
+        """
+        This function implements 1 epoch of training with PGD attack
+        """
+
+        if train:
+            indices = np.random.permutation(len(X))
+        else:
+            indices = np.array(list(range(len(X))))
+
+        total_loss = 0
+        total_p1 = 0
+        total_p2 = 0
+        total_l3 = 0
+
+        if train:
+            # print("len(X):", len(X), ", bs: ", bs)
+            _iter = tqdm(range(len(X) // bs))
+        else:
+            _iter = range(len(X) // bs)
+        for b in _iter:
+            # for each batch
+            start = time.time()
+            x = []
+            xref = []
+            uref = []
+            for id in indices[b * bs : (b + 1) * bs]:
+                if args.use_cuda:
+                    x.append(torch.from_numpy(X[id][0]).float().cuda())
+                    xref.append(torch.from_numpy(X[id][1]).float().cuda())
+                    uref.append(torch.from_numpy(X[id][2]).float().cuda())
+                elif use_mps:
+                    x.append(torch.from_numpy(X[id][0]).float().to("mps"))
+                    xref.append(torch.from_numpy(X[id][1]).float().to("mps"))
+                    uref.append(torch.from_numpy(X[id][2]).float().to("mps"))
+                else:
+                    x.append(torch.from_numpy(X[id][0]).float())
+                    xref.append(torch.from_numpy(X[id][1]).float())
+                    uref.append(torch.from_numpy(X[id][2]).float())
+
+            x, xref, uref = (torch.stack(d).detach() for d in (x, xref, uref))
+            x = x.requires_grad_()
+
+            start = time.time()
+
+            delta = attack_pgd(torch.stack([x, xref, uref], dim=1),
+                               args.robust_eps,
+                               ranges,
+                               args.robust_alpha, 
+                               args.robust_attack_iters,
+                               args.robust_restarts,
+                               args.robust_norm,
+                                train,
+                                acc,
+                                detach,
+                                clone)
+            
+            print("delta: ",delta.shape)
+            assert(1==0)
+            
+            x_ptb = x + delta[:,0:num_dim_x]
+            xref_ptb = xref + delta[:, num_dim_x:(2*num_dim_x)]
+            uref_ptb = uref + delta[:, (2*num_dim_x):]
+
+            loss, p1, p2, l3 = forward(
+                x_ptb,
+                xref_ptb,
+                uref_ptb,
+                _lambda=_lambda,
+                verbose=False if not train else False,
+                acc=acc,
+                detach=detach,
+                clone=clone,
+                zero_order=False,
+            )
+
+            start = time.time()
+            if train and not clone:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                # print('backwad(): %.3f s'%(time.time() - start))
+            elif train and clone:
+                hardtanh_optimizer.zero_grad()
+                loss.backward()
+                hardtanh_optimizer.step()
+
+            total_loss += loss.item() * x.shape[0]
+            if acc:
+                total_p1 += p1.sum()
+                total_p2 += p2.sum()
+                total_l3 += l3 * x.shape[0]
+        return total_loss / len(X), total_p1 / len(X), total_p2 / len(X), total_l3 / len(X)
 
 
     def trainval(
@@ -600,7 +873,7 @@ def main(args=None):
         f = f_func(x)
         B = B_func(x)
         DfDx = Jacobian(f, x)
-        DBDx = torch.zeros(bs, num_dim_x, num_dim_x, num_dim_control).type(x.type())
+        DBDx = torch.zeros(bs, num_dim_x, num_dim_x, num_dim_control).type(x.dtype)
         for i in range(num_dim_control):
             DBDx[:, :, :, i] = Jacobian(B[:, :, i].unsqueeze(-1), x)
 
@@ -700,13 +973,22 @@ def main(args=None):
     # Start training a tanh network
     for epoch in range(args.epochs):
         adjust_learning_rate(optimizer, epoch)
-        loss, _, _, _ = trainval(
-            X_tr,
-            train=True,
-            _lambda=args._lambda,
-            acc=False,
-            detach=True if epoch < args.lr_step else False,
-        )
+        if args.robust_train:
+            print("Using adversarial training.")
+            loss, _, _, _ = robust_trainval(X_tr,
+                            train=True,
+                            _lambda=args._lambda,
+                            acc=False,
+                            detach=True if epoch < args.lr_step else False
+                        )
+        else:
+            print("Using vanilla training.")
+            loss, _, _, _ = trainval(X_tr,
+                                    train=True,
+                                    _lambda=args._lambda,
+                                    acc=False,
+                                    detach=True if epoch < args.lr_step else False,
+                                )
         print("Training loss: ", loss)
         loss, p1, p2, l3 = trainval(X_te, train=False, _lambda=0.0, acc=True, detach=False)
         print("Epoch %d: Testing loss/p1/p2/l3: " % epoch, loss, p1, p2, l3)

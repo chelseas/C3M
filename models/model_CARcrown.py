@@ -9,7 +9,7 @@ effective_dim_end = 4
 INVERSE_METRIC = False
 
 use_mps = False
-# device = 'cpu'
+device = 'cpu'
 # if torch.backends.mps.is_available() and torch.backends.mps.is_built():
 #     torch.set_default_device('mps')
 #     use_mps = True
@@ -50,7 +50,7 @@ class U_FUNC(nn.Module):
         else: # use whole x
             d1 = 0
             d2 = self.num_dim_x
-        print("input shape: ", torch.cat([x[:, d1:d2], xe], dim=1).reshape(bs, -1).shape)
+        # print("input shape: ", torch.cat([x[:, d1:d2], xe], dim=1).reshape(bs, -1).shape)
         w1_xe = self.model_u_w1(torch.cat([x[:, d1:d2], xe], dim=1).reshape(bs, -1)).reshape(
             bs, self.num_dim_control, -1
         )
