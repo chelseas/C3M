@@ -20,6 +20,7 @@ sys.path.append("systems")
 sys.path.append("configs")
 sys.path.append("models")
 import argparse
+# import pdb
 
 np.random.seed(1024)
 
@@ -74,35 +75,40 @@ def cmdlineparse(args):
     )
     parser.add_argument(
         "--robust_eps",
+        dest="robust_eps",
         type=float,
         default=0.3,
         help="Perturbation bound for adversarial training.",
     )
     parser.add_argument(
         "--robust_alpha",
+        dest="robust_alpha",
         type=float,
         default=2.0,
         help="Learning rate for adversarial training attack.",
     )
     parser.add_argument(
         "--robust_norm",
+        dest="robust_norm",
         type=str,
         default="l_inf",
         help="Norm for adversarial training.",
     )
     parser.add_argument(
         "--robust_attack_iters",
+        dest="robust_attack_iters",
         type=int,
         default=10,
         help="Number of iterations to create adversarial example during robust training.",
     )
     parser.add_argument(
-        '--robust_restarts',   default=1, type=int, help=" number of times that the adversarial attack can restart during adversarial training. A hyper parameter.")
+        '--robust_restarts', dest="robust_restarts", default=1, type=int, help=" number of times that the adversarial attack can restart during adversarial training. A hyper parameter.")
 
     args = parser.parse_args(args)
     return args
 
 def main(args=None):
+    # pdb.set_trace()
     args = cmdlineparse(args)
     if not args.load_model:
         os.system("cp *.py " + args.log)
@@ -329,9 +335,8 @@ def main(args=None):
         if args.use_cuda:
             z = z.cuda()
         z = z / z.norm(dim=1, keepdim=True)
-        zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2) # bs x K
         if reduce:
-            zTAz = zTAz.view(-1)
+            zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2).view(-1) # squeeze: bs*K
             negative_index = zTAz.detach().cpu().numpy() < 0
             if negative_index.sum() > 0:
                 negative_zTAz = zTAz[negative_index]
@@ -339,6 +344,7 @@ def main(args=None):
             else:
                 return torch.tensor(0.0).type(z.dtype).requires_grad_()
         else: # no reduce
+            zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2) # bs x K
             # compute avg violation of PD condition for each sample in batch
             positive_index = zTAz.detach().cpu().numpy() > 0
             negative_index = zTAz.cpu().numpy() < 0
@@ -970,6 +976,7 @@ def main(args=None):
         sys.exit()
 
 
+    # pdb.set_trace()
     # Start training a tanh network
     for epoch in range(args.epochs):
         adjust_learning_rate(optimizer, epoch)
