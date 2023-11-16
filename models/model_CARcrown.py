@@ -105,7 +105,7 @@ class W_FUNC(nn.Module):
         W_final = W_full.transpose(1, 2).matmul(W_full)
         # print("0. W_final.shape = :", W_final.shape)
         W_final = W_final + self.w_lb * torch.eye(self.num_dim_x).repeat(bs,1,1).type(x.dtype)
-        return W
+        return W_final
 
     def convert_to_hardtanh(self):
         for i, layer in enumerate(self.model_W):
