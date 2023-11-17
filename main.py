@@ -193,6 +193,7 @@ def main(args=None):
 
     X_tr = [sample_full() for _ in range(args.num_train)]
     X_te = [sample_full() for _ in range(args.num_test)]
+    print(type(X_tr))
 
     if "Bbot_func" not in locals():
 
@@ -347,14 +348,14 @@ def main(args=None):
             zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2) # bs x K
             # compute avg violation of PD condition for each sample in batch
             positive_index = zTAz.detach().cpu().numpy() > 0
-            negative_index = zTAz.cpu().numpy() < 0
+            negative_index = zTAz < 0
             # no loss contrib from pos so zero them
             zTAz[positive_index] = 0.
             # next average neg values
             num_neg_each_row = negative_index.sum(-1) # if this is zero for any data point, don't want to divide by zero
             num_neg_each_row[num_neg_each_row == 0.0] = 1.0 # 0/1 = 0
             neg_mean = zTAz.sum(dim=-1) / num_neg_each_row 
-            print("loss dim: ", neg_mean.shape)
+            # print("loss dim: ", neg_mean.shape)
             return -1.0 * neg_mean
 
 
@@ -569,6 +570,7 @@ def main(args=None):
         """
         This function calculates one batch of adversarial inputs using a PGD attack.
         """
+        X = X.squeeze(-1)
         #  keep track of most adversarial input found so far for each training example
         max_loss = torch.zeros(X.shape[0])
         max_delta = torch.zeros_like(X)
@@ -579,26 +581,43 @@ def main(args=None):
         low = ranges[:,0].reshape(1, -1)
         high = ranges[:,1].reshape(1, -1)
         Xrange = high - low
+        ############## Sanity check: loss before perturbations
+        batch_loss_uptbd, p1, p2, l3 = forward( 
+            X[:,0:num_dim_x].unsqueeze(-1),
+            X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1),
+            X[:, (2*num_dim_x):].unsqueeze(-1),
+            _lambda=args._lambda,
+            verbose=False if not train else False,
+            acc=acc,
+            detach=detach,
+            clone=clone,
+            zero_order=False,
+            reduce=False # key to computing loss value for every example in the batch
+        )
+        ##############
         for _ in range(restarts):
             # Initialize deltas to uniform random in 2*eps*range of each variable centered at center of range
-            delta = torch.zeros_like(X)
+            delta = torch.zeros_like(X).type(X.dtype)
             delta.uniform_(-robust_eps, robust_eps)
-            delta = delta*(Xrange) + (low+high)/2
-            assert(delta > low and delta < high) #  sanity check instead of clamp
+            delta = (delta*(Xrange) + (low+high)/2).type(X.dtype)
+            # print("delta.shape: ", delta.shape)
+            assert((delta > low).all() and (delta < high).all()) #  sanity check instead of clamp
             delta.requires_grad = True
+            delta.retain_grad()
             # optimize the deltas
             for _ in range(attack_iters):
                 # compute the perturbed inputs
-                ptbd_X = torch.clamp(X + delta, min=low, max=high)
-                x_ptb = ptbd_X[:,0:num_dim_x]
-                xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)]
-                uref_ptb = ptbd_X[:, (2*num_dim_x):]
+                ptbd_X = torch.clamp(X + delta, min=low, max=high).type(X.dtype)
+                # print("ptbd_X.dtype: ", ptbd_X.dtype)
+                x_ptb = ptbd_X[:,0:num_dim_x].unsqueeze(-1)
+                xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
+                uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
                 # compute the loss
                 loss, p1, p2, l3 = forward( #  this computes a scaler loss
                     x_ptb,
                     xref_ptb,
                     uref_ptb,
-                    _lambda=_lambda,
+                    _lambda=args._lambda,
                     verbose=False if not train else False,
                     acc=acc,
                     detach=detach,
@@ -610,6 +629,7 @@ def main(args=None):
                 grad = delta.grad.detach()
                 d = delta
                 g = grad
+                # print("delta.grad:",delta.grad)
                 if norm == "l_inf":
                     # Do gradient ascent on the disturbance delta (d)
                     d = d + alpha * torch.sign(g)
@@ -621,21 +641,22 @@ def main(args=None):
                     # scaled_g = g/(g_norm + 1e-10)
                     # d = (d + scaled_g*alpha).view(d.size(0),-1).renorm(p=2,dim=0,maxnorm=epsilon).view_as(d)
                 d = torch.clamp(d, low, high) # probably unecessary?
-                delta = d 
+                delta.data = d 
                 # reset gradient before next iter
                 delta.grad.zero_()
+                # print("loss during attack: ", loss)
             #  here we compute a loss value for each example in the batch
             # compute the perturbed inputs
-            ptbd_X = torch.clamp(X + delta, min=low, max=high)
-            x_ptb = ptbd_X[:,0:num_dim_x]
-            xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)]
-            uref_ptb = ptbd_X[:, (2*num_dim_x):]
+            ptbd_X = torch.clamp(X + delta, min=low, max=high).type(X.dtype)
+            x_ptb = ptbd_X[:,0:num_dim_x].unsqueeze(-1)
+            xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
+            uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
             # compute the loss
-            batch_loss, p1, p2, l3 = forward( #  this computes a scaler loss
+            batch_loss, p1, p2, l3 = forward(
                 x_ptb,
                 xref_ptb,
                 uref_ptb,
-                _lambda=_lambda,
+                _lambda=args._lambda,
                 verbose=False if not train else False,
                 acc=acc,
                 detach=detach,
@@ -646,6 +667,15 @@ def main(args=None):
             # store largest delta values
             max_delta[batch_loss >= max_loss] = delta.detach()[batch_loss >= max_loss]
             max_loss = torch.max(max_loss, batch_loss)
+
+            # ### Sanity check: check which data points for which the loss increased
+            # num_succ_att = (max_loss > batch_loss_uptbd).sum()
+            # print("Number of successfully attacked points: ", num_succ_att, " out of batch: ", X.shape[0])
+            # ###
+
+            # ### Sanity check: What is range of xerr?
+            # x_err = x_ptb - xref_ptb
+            # print("xerr.max(): ", x_err.max(), ", xerr.min(): ", x_err.min())
         return max_delta
 
     def robust_trainval(
@@ -700,10 +730,11 @@ def main(args=None):
             x = x.requires_grad_()
 
             start = time.time()
-
-            delta = attack_pgd(torch.stack([x, xref, uref], dim=1),
+            # print("x.shape: ", x.shape)
+            # print("X.shape, ", torch.concatenate([x, xref, uref], dim=1).shape)
+            delta = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
                                args.robust_eps,
-                               ranges,
+                               ranges.float(),
                                args.robust_alpha, 
                                args.robust_attack_iters,
                                args.robust_restarts,
@@ -713,12 +744,9 @@ def main(args=None):
                                 detach,
                                 clone)
             
-            print("delta: ",delta.shape)
-            assert(1==0)
-            
-            x_ptb = x + delta[:,0:num_dim_x]
-            xref_ptb = xref + delta[:, num_dim_x:(2*num_dim_x)]
-            uref_ptb = uref + delta[:, (2*num_dim_x):]
+            x_ptb = x + delta[:,0:num_dim_x].unsqueeze(-1)
+            xref_ptb = xref + delta[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
+            uref_ptb = uref + delta[:, (2*num_dim_x):].unsqueeze(-1)
 
             loss, p1, p2, l3 = forward(
                 x_ptb,
