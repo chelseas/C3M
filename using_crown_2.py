@@ -5,23 +5,24 @@ from torch.autograd import grad
 import torchviz
 import importlib
 import sys
+import os
 import colored_traceback
 colored_traceback.add_hook(always=True)
-# sys.path.append("../Verifier_Development")
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.jacobian import JacobianOP, GradNorm
-sys.path.append("../C3M/systems")
-sys.path.append("../C3M/configs")
-sys.path.append("../C3M/models")
-sys.path.append("../C3M")
-# options
-# log = "../C3M/saved_models/Y_eps0p0"
-log = "../C3M/logs/car_red_2"
-use_cuda = False
-task = "CARcrown"
 from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients, clean_unsupported_ops
 
+sys.path.append("systems")
+sys.path.append("configs")
+sys.path.append("models")
+
+# options
+# log = "../C3M/logs/car_red_2"  # New model
+
+log = os.path.join(os.path.dirname(__file__), "saved_models/Y_eps0p0")
+use_cuda = False
+task = "CARcrown"
 
 # load the metric and controller
 use_hardtanh = False
@@ -44,7 +45,7 @@ else:
 map_location = "cuda" if use_cuda else "cpu"
 
 # load functions for model
-system = importlib.import_module("system_" + task)
+system = importlib.import_module("systems.system_" + task)
 f_func = system.f_func
 B_func = system.B_func
 num_dim_x = system.num_dim_x
@@ -52,7 +53,7 @@ num_dim_control = system.num_dim_control
 if hasattr(system, "Bbot_func"):
     Bbot_func = system.Bbot_func
 
-model = importlib.import_module("model_" + task)
+model = importlib.import_module("models.model_" + task)
 # get_model = model.get_model
 INVERSE_METRIC = model.INVERSE_METRIC
 assert(not INVERSE_METRIC)
@@ -74,19 +75,19 @@ if "Bbot_func" not in locals():
 
 # spoof inputs
 bs = 1
-lambda_ = 0.01
 x = torch.rand((bs, num_dim_x, 1)).requires_grad_()
 xref = torch.rand((bs, num_dim_x, 1)).requires_grad_()
-xerr = x - xref
 uref = torch.rand((bs, num_dim_control, 1)).requires_grad_()
 xall = torch.concat((x, xref, uref), dim=1)
-
 # lirpa inputs
 eps = 0.3
 norm = float("inf")
 ptb = PerturbationLpNorm(norm = norm, eps = eps)
 x_ptb = BoundedTensor(x, ptb)
 xall_ptb = BoundedTensor(xall, ptb)
+
+xerr = x - xref
+lambda_ = 0.01
 
 def create_clean_Wu_funcs(replace="relu"):
     print("replacing unsupported ops with: ", replace)
@@ -230,25 +231,33 @@ class CertVerComparison(nn.Module):
         # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
         return gersh_ub_eig_Q
 
-certvermodel = CertVerModel(xall, replace="tanh")
-certvermodel_comparison = CertVerComparison(xall, replace="tanh")
-print("crown: ")
-out = certvermodel(xall)
-print("using autograd:")
-out_c = certvermodel_comparison(xall)
-print(f"out: {out}")
-print(f"out_c : {out_c}")
-# g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref, "eigQ": out})
-# g.view()
-# gc = torchviz.make_dot(out_c, params={"x": x, "xref": xref, "uref": uref, "eigQ": out})
-# gc.view()
-print("trying to build CROWN graph ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~`")
-lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
-print("Was able to build CROWN graph.")
-print('Output', lirpa_model(xall))
-print("Was able to call CROWN graph.")
-print(f"out_c for comparison: {out_c}")
-# lirpa_model(x_ptb) # error here when returning f_func(x)
-lb, ub = lirpa_model.compute_bounds(x=(xall_ptb,), method='CROWN') #'IBP')
-print("was able to compute bounds using CROWN graph.")
-print(f"lb: {lb}, ub: {ub}")
+
+def build_model():
+    """Function utilized by the complete verifier to build the model."""
+    return CertVerModel(xall, replace="tanh")
+
+
+if __name__ == '__main__':
+    certvermodel = build_model()
+    breakpoint()
+    certvermodel_comparison = CertVerComparison(xall, replace="tanh")
+    print("crown: ")
+    out = certvermodel(xall)
+    print("using autograd:")
+    out_c = certvermodel_comparison(xall)
+    print(f"out: {out}")
+    print(f"out_c : {out_c}")
+    # g = torchviz.make_dot(out, params={"x": x, "xref": xref, "uref": uref, "eigQ": out})
+    # g.view()
+    # gc = torchviz.make_dot(out_c, params={"x": x, "xref": xref, "uref": uref, "eigQ": out})
+    # gc.view()
+    print("trying to build CROWN graph ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~`")
+    lirpa_model = BoundedModule(certvermodel, torch.empty_like(xall))
+    print("Was able to build CROWN graph.")
+    print('Output', lirpa_model(xall))
+    print("Was able to call CROWN graph.")
+    print(f"out_c for comparison: {out_c}")
+    # lirpa_model(x_ptb) # error here when returning f_func(x)
+    lb, ub = lirpa_model.compute_bounds(x=(xall_ptb,), method='CROWN') #'IBP')
+    print("was able to compute bounds using CROWN graph.")
+    print(f"lb: {lb}, ub: {ub}")
