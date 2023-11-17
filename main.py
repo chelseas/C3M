@@ -84,7 +84,7 @@ def cmdlineparse(args):
         "--robust_alpha",
         dest="robust_alpha",
         type=float,
-        default=2.0,
+        default=.05,
         help="Learning rate for adversarial training attack.",
     )
     parser.add_argument(
@@ -129,10 +129,6 @@ def main(args=None):
     U_MAX = config.UREF_MAX
     XE_MIN = config.XE_MIN
     XE_MAX = config.XE_MAX
-    low = np.concatenate([X_MIN, X_MIN, U_MIN]).reshape(-1,1)
-    high = np.concatenate([X_MAX, X_MAX, U_MAX]).reshape(-1,1)
-    ranges = torch.tensor(np.hstack([low, high])).reshape(-1,2)
-    print("ranges: ", ranges)
 
     system = importlib.import_module("system_" + args.task)
     f_func = system.f_func
@@ -527,6 +523,7 @@ def main(args=None):
                 torch.linalg.eigh(Contraction)[0].mean(),
             )
         if acc:
+            # p1 is the number of datapoints where all the eigenvalues are < 0 
             return (
                 loss,
                 ((torch.linalg.eigh(Contraction)[0] >= 0).sum(dim=1) == 0)
@@ -558,7 +555,6 @@ def main(args=None):
 
     def attack_pgd(X,
                    robust_eps,
-                   ranges,
                    alpha, 
                    attack_iters,
                    restarts,
@@ -569,21 +565,37 @@ def main(args=None):
                    clone):
         """
         This function calculates one batch of adversarial inputs using a PGD attack.
+        HOWEVER, the attack is done in terms of delta = {delta_x, delta_xerr, delta_uref} not interms of x_ref.
         """
         X = X.squeeze(-1)
+        xerr = X[:,0:num_dim_x] - X[:, num_dim_x:(2*num_dim_x)] # xerr = x - xref
         #  keep track of most adversarial input found so far for each training example
         max_loss = torch.zeros(X.shape[0])
         max_delta = torch.zeros_like(X)
         if args.use_cuda:
             max_loss.cuda()
             max_delta.cuda()
-        # ranges is a matrix that looks like [[-1,1], [1,2],...] Containing the available ranges for each state variable
-        low = ranges[:,0].reshape(1, -1)
-        high = ranges[:,1].reshape(1, -1)
-        Xrange = high - low
+        # delta is x, xerr, uref
+        delta_low = torch.tensor(np.concatenate([X_MIN, XE_MIN, U_MIN]).reshape(1,-1)).type(X.dtype)
+        delta_high = torch.tensor(np.concatenate([X_MAX, XE_MAX, U_MAX]).reshape(1,-1)).type(X.dtype)
+        # print("delta_low: ", delta_low)
+        delta_range = delta_high - delta_low
+        delta_min = -robust_eps*delta_range + (delta_low+delta_high)/2
+        delta_max = robust_eps*delta_range + (delta_low+delta_high)/2
+        # the largest possible xerr delta is a function of the data points in X (xerr)
+        delta_min_xerr = torch.maximum(torch.tensor(XE_MIN.reshape(1,-1)) - xerr, delta_min[:,num_dim_x:(2*num_dim_x)].reshape(1,-1)).detach() # contains batch dim
+        # print("most conservative min bounds: ", delta_min_xerr.max(dim=0))
+        # print("least conservative min bounds: ", delta_min_xerr.min(dim=0))
+        delta_max_xerr = torch.minimum(torch.tensor(XE_MAX.reshape(1,-1)) - xerr, delta_max[:,num_dim_x:(2*num_dim_x)].reshape(1,-1)).detach()
+        # print("most conservative max bounds: ", delta_max_xerr.min(dim=0))
+        # print("least conservative max bounds: ", delta_max_xerr.max(dim=0))
+        # X is x, xref, uref
+        X_low = torch.tensor(np.concatenate([X_MIN, X_MIN, U_MIN]).reshape(1,-1)).type(X.dtype)
+        X_high = torch.tensor(np.concatenate([X_MAX, X_MAX, U_MAX]).reshape(1,-1)).type(X.dtype)
+        # print("X_low: ", X_low)
         ############## Sanity check: loss before perturbations
         batch_loss_uptbd, p1, p2, l3 = forward( 
-            X[:,0:num_dim_x].unsqueeze(-1),
+            X[:, 0:num_dim_x].unsqueeze(-1),
             X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1),
             X[:, (2*num_dim_x):].unsqueeze(-1),
             _lambda=args._lambda,
@@ -599,19 +611,33 @@ def main(args=None):
             # Initialize deltas to uniform random in 2*eps*range of each variable centered at center of range
             delta = torch.zeros_like(X).type(X.dtype)
             delta.uniform_(-robust_eps, robust_eps)
-            delta = (delta*(Xrange) + (low+high)/2).type(X.dtype)
+            delta = (delta*(delta_range) + (delta_low+delta_high)/2).type(X.dtype)
             # print("delta.shape: ", delta.shape)
-            assert((delta > low).all() and (delta < high).all()) #  sanity check instead of clamp
+            assert((delta <= delta_max).all() and (delta >= delta_min).all()) # sanity check
             delta.requires_grad = True
             delta.retain_grad()
             # optimize the deltas
             for _ in range(attack_iters):
                 # compute the perturbed inputs
-                ptbd_X = torch.clamp(X + delta, min=low, max=high).type(X.dtype)
+                delta_x = delta[:,:num_dim_x]
+                delta_xerr = delta[:, num_dim_x:2*num_dim_x]
+                delta_uref = delta[:, 2*num_dim_x:]
+                # clamp to x_err range because it won't be clamped in ptbd_X
+                delta_xerr = torch.clamp(delta_xerr, min=delta_min_xerr, max=delta_max_xerr) # this uses batch dim bounds
+                # clamp to x, xref and uref ranges
+                delta_forX = torch.concatenate([delta_x,
+                                                delta_x - delta_xerr,
+                                                delta_uref], dim=1)
+                ptbd_X = torch.clamp(X + delta_forX, min=X_low, max=X_high).type(X.dtype)
                 # print("ptbd_X.dtype: ", ptbd_X.dtype)
                 x_ptb = ptbd_X[:,0:num_dim_x].unsqueeze(-1)
                 xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
                 uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
+                
+                # ### Sanity check: What is range of xerr?
+                # x_err_ptb = x_ptb - xref_ptb
+                # print("xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
+                
                 # compute the loss
                 loss, p1, p2, l3 = forward( #  this computes a scaler loss
                     x_ptb,
@@ -634,20 +660,30 @@ def main(args=None):
                     # Do gradient ascent on the disturbance delta (d)
                     d = d + alpha * torch.sign(g)
                     # clamp to limited disturbance range
-                    d = torch.clamp(d, min=-robust_eps*Xrange, max=robust_eps*Xrange)
+                    d = torch.clamp(d, min=-robust_eps*delta_range, max=robust_eps*delta_range)
                 elif norm == "l_2":
                     raise NotImplementedError
                     # g_norm = torch.norm(g.view(g.shape[0],-1),dim=1).view(-1,1,1,1)
                     # scaled_g = g/(g_norm + 1e-10)
                     # d = (d + scaled_g*alpha).view(d.size(0),-1).renorm(p=2,dim=0,maxnorm=epsilon).view_as(d)
-                d = torch.clamp(d, low, high) # probably unecessary?
+                # d = torch.clamp(d, delta_low, delta_high) # probably unecessary?
                 delta.data = d 
                 # reset gradient before next iter
                 delta.grad.zero_()
                 # print("loss during attack: ", loss)
             #  here we compute a loss value for each example in the batch
             # compute the perturbed inputs
-            ptbd_X = torch.clamp(X + delta, min=low, max=high).type(X.dtype)
+            delta_x = delta[:,:num_dim_x]
+            delta_xerr = delta[:, num_dim_x:2*num_dim_x]
+            delta_uref = delta[:, 2*num_dim_x:]
+            # clamp to x_err range because it won't be clamped in ptbd_X
+            delta_xerr = torch.clamp(delta_xerr, min=delta_min_xerr, max=delta_max_xerr)
+            # clamp to x, xref and uref ranges
+            delta_forX = torch.concatenate([delta_x,
+                                            delta_x - delta_xerr,
+                                            delta_uref], dim=1)
+            ptbd_X = torch.clamp(X + delta_forX, min=X_low, max=X_high).type(X.dtype)
+            # print("ptbd_X.dtype: ", ptbd_X.dtype)
             x_ptb = ptbd_X[:,0:num_dim_x].unsqueeze(-1)
             xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
             uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
@@ -669,13 +705,13 @@ def main(args=None):
             max_loss = torch.max(max_loss, batch_loss)
 
             # ### Sanity check: check which data points for which the loss increased
-            # num_succ_att = (max_loss > batch_loss_uptbd).sum()
+            num_succ_att = (max_loss > batch_loss_uptbd).sum()
             # print("Number of successfully attacked points: ", num_succ_att, " out of batch: ", X.shape[0])
             # ###
 
             # ### Sanity check: What is range of xerr?
-            # x_err = x_ptb - xref_ptb
-            # print("xerr.max(): ", x_err.max(), ", xerr.min(): ", x_err.min())
+            # x_err_ptb = x_ptb - xref_ptb
+            # print("after attack: xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
         return max_delta
 
     def robust_trainval(
@@ -734,7 +770,6 @@ def main(args=None):
             # print("X.shape, ", torch.concatenate([x, xref, uref], dim=1).shape)
             delta = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
                                args.robust_eps,
-                               ranges.float(),
                                args.robust_alpha, 
                                args.robust_attack_iters,
                                args.robust_restarts,
