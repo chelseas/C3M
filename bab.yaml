@@ -1,0 +1,34 @@
+# Configuration file for running the complete verification
+
+general:
+  conv_mode: matrix
+  enable_incomplete_verification: false
+  root_path: specs  # Folder containing the csv and vnnlib files for verification.
+  csv_name: specs/instances.csv
+model:
+  name: >-
+    Customized("using_crown_2.py", "build_model")
+  input_shape: [-1, 10]
+specification:
+  rhs_offset: -1.e-4
+attack:
+  pgd_order: skip
+solver:
+  batch_size: 100000
+  min_batch_size_ratio: 0.
+  bound_prop_method: crown
+bab:
+  override_timeout: 1.e+8
+  decision_thresh: -1.e-6  # Tolerance. Must not be exact zero.
+  branching:
+    method: brute-force
+    sb_coeff_thresh: 0.2
+    input_split:
+      enable: True
+      adv_check: -1
+      ibp_enhancement: True
+      compare_with_old_bounds: True
+      bf_rhs_offset: 1.e-4
+      bf_backup_thresh: 0.01
+      bf_zero_crossing_score: True
+      sb_margin_weight: 0.1
