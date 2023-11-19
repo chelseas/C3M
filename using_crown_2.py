@@ -114,6 +114,7 @@ class CertVerModel(nn.Module):
         super(CertVerModel, self).__init__()
         #clean upsupported ops
         self.f_func = f_func
+        x = x.unsqueeze(-1)
         self.B = B_func(x) # init const with correct batch size
         self.DBDx_x = system.DBDx_func(x)
         W_func, u_func = create_clean_Wu_funcs(replace=replace)
@@ -180,6 +181,7 @@ class CertVerComparison(nn.Module):
         super(CertVerComparison, self).__init__()
         #clean upsupported ops
         self.f_func = f_func
+        x = x.unsqueeze(-1)
         self.B = B_func(x) # init const with correct batch size
         self.DBDx_x = system.DBDx_func(x)
         W_func, u_func = create_clean_Wu_funcs(replace=replace)
@@ -188,6 +190,7 @@ class CertVerComparison(nn.Module):
         self.DfDx = system.DfDx_func
     def forward(self, xall):
         # print("xall.shape = ", xall.shape)
+        xall = xall.unsqueeze(-1)
         x = xall[:,:num_dim_x]
         xref = xall[:,num_dim_x:num_dim_x*2]
         uref = xall[:,num_dim_x*2:]
@@ -271,5 +274,8 @@ if __name__ == '__main__':
     print(f"lb: {lb}, ub: {ub}")
 
     print('Testing batching')
-    output = lirpa_model(xall_ptb.repeat(2,1,1))
-    print(output)
+    xall_ptb = xall_ptb.repeat(20, 1)
+    output = lirpa_model(xall_ptb)
+    print('Output', output)
+    lb, ub = lirpa_model.compute_bounds(x=(xall_ptb,), method='CROWN') #'IBP')
+    print(f"lb: {lb}, ub: {ub}")
