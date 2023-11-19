@@ -81,8 +81,11 @@ class W_FUNC(nn.Module):
         self.w_lb = w_lb
         self.num_dim_x = num_dim_x
         self.num_dim_control = num_dim_control
+        self.eye_bias = self.w_lb * torch.eye(self.num_dim_x)
 
     def forward(self, x):
+        self.eye_bias = self.eye_bias.to(x.device)
+
         bs = x.shape[0]
         x = x.reshape(bs, -1)
 
@@ -92,20 +95,30 @@ class W_FUNC(nn.Module):
         # print("W.shape: ", W.shape)
         W_right = W[:, :, (self.num_dim_x - self.num_dim_control):]
 
-        Wbot = self.model_Wbot(torch.ones(bs, 1).type(x.dtype)).view(
+        Wbot = self.model_Wbot(
+            torch.ones(bs, 1, device=x.device, dtype=x.dtype)
+        ).view(
             bs,
             self.num_dim_x - self.num_dim_control,
             self.num_dim_x - self.num_dim_control,
         )
 
         # stack to create final W matrix
-        W_left = torch.concat([Wbot, torch.zeros(bs, self.num_dim_control, self.num_dim_x-self.num_dim_control)], dim=1)
+        W_left = torch.concat([
+            Wbot, torch.zeros(
+                bs,
+                self.num_dim_control,
+                self.num_dim_x - self.num_dim_control,
+                device=x.device,
+            )], dim=1)
         W_full = torch.concat([W_left, W_right], dim=2)
 
         W_final = W_full.transpose(1, 2).matmul(W_full)
         # print("0. W_final.shape = :", W_final.shape)
-        W_final = W_final + self.w_lb * torch.eye(self.num_dim_x).repeat(bs,1,1).type(x.dtype)
-        return W_final
+        W_final = W_final + self.eye_bias
+
+        return W
+        #return W_final
 
     def convert_to_hardtanh(self):
         for i, layer in enumerate(self.model_W):

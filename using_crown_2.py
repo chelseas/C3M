@@ -7,12 +7,12 @@ import importlib
 import sys
 import os
 import colored_traceback
-colored_traceback.add_hook(always=True)
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.jacobian import JacobianOP, GradNorm
 from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients, clean_unsupported_ops
 
+colored_traceback.add_hook(always=True)
 sys.path.append("systems")
 sys.path.append("configs")
 sys.path.append("models")
@@ -120,36 +120,43 @@ class CertVerModel(nn.Module):
         self.u_func = u_func
         self.W_func = W_func
         self.DfDx = system.DfDx_func
+
     def forward(self, xall):
+        self.B = self.B.to(xall.device)
+        self.DBDx_x = self.DBDx_x.to(xall.device)
+
         # print("xall.shape = ", xall.shape)
+        bsz = xall.shape[0]
         x = xall[:,:num_dim_x]
         xref = xall[:,num_dim_x:num_dim_x*2]
         uref = xall[:,num_dim_x*2:]
         xerr = x - xref
         u = self.u_func(x, xerr, uref)
-        K = JacobianOP.apply(u, x).reshape(bs, num_dim_control, num_dim_x)
-        A = self.DfDx(x) + (u.reshape(bs, 1, 1, num_dim_control)*self.DBDx_x).sum(dim=-1)
+        K = JacobianOP.apply(u, x).reshape(bsz, num_dim_control, num_dim_x)
+        A = (self.DfDx(x) + (
+            u.reshape(bsz, 1, 1, num_dim_control) * self.DBDx_x
+        ).sum(dim=-1))
         # print("A.shape: ", A.shape)
         # print("self.f_func(x).shape =", self.f_func(x).shape)
         # print("self.B.shape =", self.B.shape)
         # print("u.shape =", u.shape)
         # print("self.B.matmul(u).shape =", self.B.matmul(u).shape)
-        dxdt = self.f_func(x).reshape(bs, num_dim_x, 1) + self.B.matmul(u)
+        dxdt = self.f_func(x).reshape(bsz, num_dim_x, 1) + self.B.matmul(u)
         # print("dxdt.shape: ", dxdt.shape)
         M = self.W_func(x)
         # print("M.shape = ", M.shape)
         print("x.shape = ", x.shape)
         # dMdx = JacobianOP.apply(M.reshape(bs, -1), x.reshape(bs, num_dim_x))
-        dMdx = JacobianOP.apply(M.reshape(bs, -1), x) # creates jac of shape (1,16,4,1)
+        dMdx = JacobianOP.apply(M.reshape(bsz, -1), x) # creates jac of shape (1,16,4,1)
         print("dMdx.shape 0: ", dMdx.shape)
-        dMdx = dMdx.reshape(bs, -1, num_dim_x) # remove trailing 1 dimension so it's (1,16,4)
+        dMdx = dMdx.reshape(bsz, -1, num_dim_x) # remove trailing 1 dimension so it's (1,16,4)
         # print("dMdx.shape 1: ", dMdx.shape)
         # print("dxdt.shape: ", dxdt.shape)
         dMdt_flat = dMdx.matmul(dxdt) # (1,16,4)x(1,4,1) should create (1,16,1)
         # print("dMdt_flat.shape: ", dMdt_flat.shape)
         # print("self.B,shape: ", self.B.shape)
         # print("K.shape: ", K.shape)
-        dMdt = dMdt_flat.reshape(bs, num_dim_x, num_dim_x)
+        dMdt = dMdt_flat.reshape(bsz, num_dim_x, num_dim_x)
         M_A_BK = M.matmul( A + self.B.matmul(K) )
         Q = (dMdt + M_A_BK
                   + M_A_BK.transpose(1,2)
@@ -239,7 +246,6 @@ def build_model():
 
 if __name__ == '__main__':
     certvermodel = build_model()
-    breakpoint()
     certvermodel_comparison = CertVerComparison(xall, replace="tanh")
     print("crown: ")
     out = certvermodel(xall)
@@ -261,3 +267,7 @@ if __name__ == '__main__':
     lb, ub = lirpa_model.compute_bounds(x=(xall_ptb,), method='CROWN') #'IBP')
     print("was able to compute bounds using CROWN graph.")
     print(f"lb: {lb}, ub: {ub}")
+
+    print('Testing batching')
+    output = lirpa_model(xall_ptb.repeat(2,1,1))
+    print(output)
