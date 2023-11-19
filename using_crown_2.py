@@ -75,9 +75,9 @@ if "Bbot_func" not in locals():
 
 # spoof inputs
 bs = 1
-x = torch.rand((bs, num_dim_x, 1)).requires_grad_()
-xref = torch.rand((bs, num_dim_x, 1)).requires_grad_()
-uref = torch.rand((bs, num_dim_control, 1)).requires_grad_()
+x = torch.rand((bs, num_dim_x)).requires_grad_()
+xref = torch.rand((bs, num_dim_x)).requires_grad_()
+uref = torch.rand((bs, num_dim_control)).requires_grad_()
 xall = torch.concat((x, xref, uref), dim=1)
 # lirpa inputs
 eps = 0.3
@@ -122,11 +122,13 @@ class CertVerModel(nn.Module):
         self.DfDx = system.DfDx_func
 
     def forward(self, xall):
+        bsz = xall.shape[0]
+        xall = xall.reshape(bsz, xall.shape[1], 1)
+
         self.B = self.B.to(xall.device)
         self.DBDx_x = self.DBDx_x.to(xall.device)
 
         # print("xall.shape = ", xall.shape)
-        bsz = xall.shape[0]
         x = xall[:,:num_dim_x]
         xref = xall[:,num_dim_x:num_dim_x*2]
         uref = xall[:,num_dim_x*2:]
