@@ -77,7 +77,7 @@ def cmdlineparse(args):
         "--robust_eps",
         dest="robust_eps",
         type=float,
-        default=0.3,
+        default=0.1,
         help="Perturbation bound for adversarial training.",
     )
     parser.add_argument(
@@ -716,12 +716,14 @@ def main(args=None):
 
     def robust_trainval(
         X,
+        epoch,
         bs=args.bs,
         train=True,
         _lambda=args._lambda,
         acc=False,
         detach=False,
         clone=False,
+        ptb_sched=None
     ):  
         """
         This function implements 1 epoch of training with PGD attack
@@ -737,11 +739,12 @@ def main(args=None):
         total_p2 = 0
         total_l3 = 0
 
+        num_train_batches = len(X) // bs
         if train:
             # print("len(X):", len(X), ", bs: ", bs)
-            _iter = tqdm(range(len(X) // bs))
+            _iter = tqdm(range(num_train_batches))
         else:
-            _iter = range(len(X) // bs)
+            _iter = range(num_train_batches)
         for b in _iter:
             # for each batch
             start = time.time()
@@ -768,16 +771,20 @@ def main(args=None):
             start = time.time()
             # print("x.shape: ", x.shape)
             # print("X.shape, ", torch.concatenate([x, xref, uref], dim=1).shape)
-            delta = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
-                               args.robust_eps,
-                               args.robust_alpha, 
-                               args.robust_attack_iters,
-                               args.robust_restarts,
-                               args.robust_norm,
-                                train,
-                                acc,
-                                detach,
-                                clone)
+            robust_eps_i = ptb_sched(epoch + (b + 1)/num_train_batches)
+            if robust_eps_i > 0:
+                delta = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
+                                robust_eps_i,
+                                args.robust_alpha, 
+                                args.robust_attack_iters,
+                                args.robust_restarts,
+                                args.robust_norm,
+                                    train,
+                                    acc,
+                                    detach,
+                                    clone)
+            else:
+                delta = torch.zeros_like(torch.concatenate([x, xref, uref], dim=1).squeeze(-1))
             
             x_ptb = x + delta[:,0:num_dim_x].unsqueeze(-1)
             xref_ptb = xref + delta[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
@@ -811,6 +818,7 @@ def main(args=None):
                 total_p1 += p1.sum()
                 total_p2 += p2.sum()
                 total_l3 += l3 * x.shape[0]
+        print("robust_eps_i at epoch end was: ", robust_eps_i)
         return total_loss / len(X), total_p1 / len(X), total_p2 / len(X), total_l3 / len(X)
 
 
@@ -1038,18 +1046,20 @@ def main(args=None):
 
         sys.exit()
 
-
-    # pdb.set_trace()
+    # perturbation schedule for robust training
+    ptb_schedule = lambda t: np.interp([t], [0, args.epochs // 3, args.epochs * 2 // 3, args.epochs], [0.0, 0.0, args.robust_eps/1.2, args.robust_eps])[0]
     # Start training a tanh network
     for epoch in range(args.epochs):
         adjust_learning_rate(optimizer, epoch)
         if args.robust_train:
             print("Using adversarial training.")
             loss, _, _, _ = robust_trainval(X_tr,
+                                            epoch,
                             train=True,
                             _lambda=args._lambda,
                             acc=False,
-                            detach=True if epoch < args.lr_step else False
+                            detach=True if epoch < args.lr_step else False,
+                            ptb_sched = ptb_schedule,
                         )
         else:
             print("Using vanilla training.")
