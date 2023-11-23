@@ -15,7 +15,7 @@ device = 'cpu'
 #     use_mps = True
 #     device = 'mps'
 # whether or not to use translation invariance in controller
-contr_tvdim = True
+contr_tvdim = False
 
 class MixedTanh(nn.Module):
     def __init__(self):
@@ -117,8 +117,7 @@ class W_FUNC(nn.Module):
         # print("0. W_final.shape = :", W_final.shape)
         W_final = W_final + self.eye_bias
 
-        return W
-        #return W_final
+        return W_final
 
     def convert_to_hardtanh(self):
         for i, layer in enumerate(self.model_W):
