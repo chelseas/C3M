@@ -10,9 +10,9 @@ model:
     Customized("using_crown_2.py", "build_model")
   input_shape: [-1, 10]
 specification:
-  rhs_offset: -1.e-4
+  rhs_offset: -1.e-4 # -1.e-4 default value 
 attack:
-  pgd_order: skip
+  pgd_order: skip # before # skip 
 solver:
   batch_size: 100000
   min_batch_size_ratio: 0.

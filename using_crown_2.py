@@ -8,18 +8,24 @@ import os
 import colored_traceback
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
-from auto_LiRPA.jacobian import JacobianOP
-from using_crown_utils import clean_unsupported_ops
+from auto_LiRPA.jacobian import JacobianOP, GradNorm
 
-colored_traceback.add_hook(always=True)
 sys.path.append("systems")
 sys.path.append("configs")
 sys.path.append("models")
+
+sys.path.append(os.path.dirname(__file__))
+from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients, clean_unsupported_ops
+
+colored_traceback.add_hook(always=True)
+
 
 # options
 log = os.path.join(os.path.dirname(__file__), "logs/1129.test_l1reg_3") # New model
 # log = os.path.join(os.path.dirname(__file__), "logs/car_red_2") # New model
 # log = os.path.join(os.path.dirname(__file__), "saved_models/Y_eps0p0")
+# log = "../C3M/saved_models/Y_eps0p0" # old model
+# log = "../C3M/logs/car_red_2"  # New model
 
 
 def build_model(log, comparison=False):
