@@ -373,7 +373,7 @@ def main(args=None):
         detach=False,
         clone=False,
         zero_order=False,
-        reduce=True
+        reduce=True,
     ):
         # print("W_func.device: ", W_func.model_W[0].weight.device)
         # print("x.device: ", x.device)
@@ -552,6 +552,16 @@ def main(args=None):
         + list(model_u_w1_hard.parameters()),
         lr=args.learning_rate,
     )
+
+    def regularize(epoch):
+        loss = 0.0
+        params = list(model_W.parameters()) + list(model_Wbot.parameters()) + list(model_u_w1.parameters())
+        for p in params:
+            if p.grad is not None and p.requires_grad:
+                loss += p.norm(1)
+        coeff = .0001*epoch
+        # print("regularization weight is: ", coeff)
+        return loss*coeff
 
     def attack_pgd(X,
                    robust_eps,
@@ -830,6 +840,7 @@ def main(args=None):
         acc=False,
         detach=False,
         clone=False,
+        epoch=0.
     ):  # trainval a set of x
         # torch.autograd.set_detect_anomaly(True)
 
@@ -883,6 +894,8 @@ def main(args=None):
                 clone=clone,
                 zero_order=False,
             )
+
+            loss += regularize(epoch)
 
             start = time.time()
             if train and not clone:
@@ -1068,6 +1081,7 @@ def main(args=None):
                                     _lambda=args._lambda,
                                     acc=False,
                                     detach=True if epoch < args.lr_step else False,
+                                    epoch=epoch
                                 )
         print("Training loss: ", loss)
         loss, p1, p2, l3 = trainval(X_te, train=False, _lambda=0.0, acc=True, detach=False)
