@@ -18,9 +18,9 @@ sys.path.append("configs")
 sys.path.append("models")
 
 # options
-# log = "../C3M/logs/car_red_2"  # New model
+log = os.path.join(os.path.dirname(__file__), "logs/car_red_2") # New model
+# log = os.path.join(os.path.dirname(__file__), "saved_models/Y_eps0p0")
 
-log = os.path.join(os.path.dirname(__file__), "saved_models/Y_eps0p0")
 use_cuda = False
 task = "CARcrown"
 

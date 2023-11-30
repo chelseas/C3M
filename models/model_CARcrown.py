@@ -17,6 +17,7 @@ device = 'cpu'
 # whether or not to use translation invariance in controller
 contr_tvdim = False
 
+
 class MixedTanh(nn.Module):
     def __init__(self):
         super(MixedTanh, self).__init__()

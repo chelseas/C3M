@@ -11,7 +11,7 @@ def f_func(x):
     x, y, theta, v = [x[:, 0, 0], x[:, 1, 0], x[:, 2, 0], x[:, 3, 0]]
 
     # print(f"x.shape: {x.shape}")
-    f = torch.stack([v * torch.cos(theta), 
+    f = torch.stack([v * torch.cos(theta),
                      v * torch.sin(theta),
                      torch.zeros_like(v),
                      torch.zeros_like(v),], dim=1).type(x.dtype).reshape(bs, num_dim_x, 1)
@@ -22,9 +22,15 @@ def f_func(x):
 def DfDx_func(x):
     bs = x.shape[0]
     x, y, theta, v = [x[:,0,0], x[:,1,0], x[:,2,0], x[:,3,0] ]
-    row1 = torch.stack([torch.zeros(bs), torch.zeros(bs), -v*torch.sin(theta), torch.cos(theta)], dim=1).reshape(bs, 1, num_dim_x)
-    row2 = torch.stack([torch.zeros(bs), torch.zeros(bs),  v*torch.cos(theta), torch.sin(theta)], dim=1).reshape(bs, 1, num_dim_x)
-    row34 = torch.zeros(bs, 2, num_dim_x)
+    row1 = torch.stack([torch.zeros(bs, device=x.device),
+                        torch.zeros(bs, device=x.device),
+                        -v*torch.sin(theta),
+                        torch.cos(theta)], dim=1).reshape(bs, 1, num_dim_x)
+    row2 = torch.stack([torch.zeros(bs, device=x.device),
+                        torch.zeros(bs, device=x.device),
+                        v*torch.cos(theta),
+                        torch.sin(theta)], dim=1).reshape(bs, 1, num_dim_x)
+    row34 = torch.zeros(bs, 2, num_dim_x, device=x.device)
     DfDx = torch.cat([row1, row2, row34], dim=1)
     return DfDx
 
