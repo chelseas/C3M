@@ -7,7 +7,7 @@ general:
   csv_name: specs/instances.csv
 model:
   name: >-
-    Customized("using_crown_2.py", "build_model")
+    Customized("using_crown_2.py", "build_model", log="logs/1129.test_l1reg_3")
   input_shape: [-1, 10]
 specification:
   rhs_offset: -1.e-4

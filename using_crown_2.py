@@ -16,13 +16,16 @@ sys.path.append("systems")
 sys.path.append("configs")
 sys.path.append("models")
 
-# options
-log = os.path.join(os.path.dirname(__file__), "logs/1129.test_l1reg_3") # New model
-# log = os.path.join(os.path.dirname(__file__), "logs/car_red_2") # New model
-# log = os.path.join(os.path.dirname(__file__), "saved_models/Y_eps0p0")
+# Model path:
+log = "logs/1129.test_l1reg_3" # New model
+# Previous models:
+# "logs/car_red_2"
+# "saved_models/Y_eps0p0"
 
 
 def build_model(log, comparison=False):
+    log = os.path.join(os.path.dirname(__file__), log)
+
     use_cuda = False
     task = "CARcrown"
 
