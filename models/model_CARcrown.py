@@ -15,7 +15,8 @@ device = 'cpu'
 #     use_mps = True
 #     device = 'mps'
 # whether or not to use translation invariance in controller
-contr_tvdim = False
+contr_tvdim = True
+print("Using translation invariance in controller: ", contr_tvdim)
 
 
 class MixedTanh(nn.Module):
@@ -140,9 +141,9 @@ class W_FUNC(nn.Module):
 
 
 def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0):
-    M_width = 32
+    M_width = 128
     M_depth = 2
-    u_width = 32
+    u_width = 128
     u_depth = 2
     if mixing > 0.0:
         M_width = 64

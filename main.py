@@ -26,6 +26,7 @@ import argparse
 Stats = namedtuple("Stats", "num_new_CEs num_lost_CEs")
 
 EigStats = namedtuple("EigStats", "max min mean")
+MeigStats = namedtuple("MeigStats", "max min cond_max")
 
 np.random.seed(1024)
 
@@ -45,7 +46,7 @@ def cmdlineparse(args):
     parser.set_defaults(load_model=False)
     parser.add_argument("--bs", type=int, default=1024, help="Batch size.")
     parser.add_argument(
-        "--num_train", type=int, default=4 * 32768 + 0 * 131072, help="Number of samples for training."
+        "--num_train", type=int, default=0 * 32768 + 4 * 131072, help="Number of samples for training."
     )  # 4096 * 32
     parser.add_argument(
         "--num_test", type=int, default=32768, help="Number of samples for testing."
@@ -53,10 +54,10 @@ def cmdlineparse(args):
     parser.add_argument(
         "--lr", dest="learning_rate", type=float, default=0.001, help="Base learning rate."
     )
-    parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs.")
+    parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs.")
     parser.add_argument("--lr_step", type=int, default=5, help="")
     parser.add_argument(
-        "--lambda", type=float, dest="_lambda", default=0.0, help="Convergence rate: lambda"
+        "--lambda", type=float, dest="_lambda", default=1.0, help="Convergence rate: lambda"
     )
     parser.add_argument(
         "--w_ub",
@@ -497,36 +498,37 @@ def main(args=None):
             C2_inners.append(C2_inner)
             C2s.append(C2)
 
-        # TODO: collect loss terms separately
-        if reduce:
-            # compute a scalar loss
-            loss = 0
-        else:
-            # compute a loss value for every data point in batch
-            loss = torch.zeros(x.shape[0])
-        loss += loss_pos_matrix_random_sampling(
+        # if reduce:
+        #     # compute a scalar loss
+        #     loss = 0
+        # else:
+        #     # compute a loss value for every data point in batch
+        #     loss = torch.zeros(x.shape[0])
+        loss_Q = loss_pos_matrix_random_sampling(
             -Contraction
             - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
             reduce=reduce
         )
-        loss += loss_pos_matrix_random_sampling(
+        loss_C1 = loss_pos_matrix_random_sampling(
             -C1_LHS_1 - epsilon * torch.eye(C1_LHS_1.shape[-1]).unsqueeze(0).type(x.dtype),
             reduce=reduce
         )
-        loss += loss_pos_matrix_random_sampling(
-            args.w_ub * torch.eye(W.shape[-1]).unsqueeze(0).type(x.dtype) - W,
+        loss_M = loss_pos_matrix_random_sampling(
+            args.w_ub * torch.eye(M.shape[-1]).unsqueeze(0).type(x.dtype) - M,
             reduce=reduce
         )
         # loss += loss_pos_matrix_random_sampling(W - args.w_lb * torch.eye(W.shape[-1]).unsqueeze(0).type(x.dtype))  # Make sure W is positive definite
         if reduce:
-            loss += 1.0 * sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s])
+            loss_C2 = 1.0 * sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s])
         else:
             assert(len(sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1) for C2 in C2s])) == bs)
-            loss += 1.0 * sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1) for C2 in C2s])
+            loss_C2 = 1.0 * sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1) for C2 in C2s])
 
         if clone:
             overall_clone_loss = u_error.mean() + M_error.mean() + W_error.mean()
-            loss = overall_clone_loss
+            loss = [overall_clone_loss]
+        else:
+            loss = [loss_Q, loss_C1, loss_M, loss_C2]
 
         if verbose:
             print("true eigval min,max,mean: ",
@@ -535,9 +537,20 @@ def main(args=None):
                 torch.linalg.eigh(Contraction)[0].mean().item(),
             )
         if acc:
+            # Contract_easier = (dot_M
+                # + (A + B.matmul(K)).transpose(1, 2).matmul(M.detach())
+                # + M.detach().matmul(A + B.matmul(K))
+                # + 2 * _lambda/2 * M.detach())
             true_eig_min = torch.linalg.eigh(Contraction)[0].min(dim=1)[0].min().item()
             true_eig_max = torch.linalg.eigh(Contraction)[0].max(dim=1)[0].max().item()
             true_eig_mean = torch.linalg.eigh(Contraction)[0].mean().item()
+
+            M_eigs = torch.linalg.eigh(M)[0]
+            M_eigs_min = M_eigs.min(dim=1)[0] # max eig for each datapoint in batch
+            M_eigs_max = M_eigs.max(dim=1)[0]
+            M_cond_max = (M_eigs_max / M_eigs_min).max().item() # cond number for each point in batch then take max
+            M_eig_max = M_eigs_max.max().item()
+            M_eig_min = M_eigs_min.min().item()
             # p1 is the number of datapoints where all the eigenvalues are < 0 
             return (
                 loss,
@@ -549,7 +562,8 @@ def main(args=None):
                 sum(
                     [1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s]
                 ).item(),
-                EigStats(true_eig_max, true_eig_min, true_eig_mean)
+                (EigStats(true_eig_max, true_eig_min, true_eig_mean),
+                 MeigStats(M_eig_max, M_eig_min, M_cond_max)),
             )
         else:
             return loss, None, None, None, None
@@ -615,7 +629,8 @@ def main(args=None):
                    train,
                    acc,
                    detach,
-                   clone):
+                   clone,
+                   verbose=False):
         """
         This function calculates one batch of adversarial inputs using a PGD attack.
         HOWEVER, the attack is done in terms of delta = {delta_x, delta_xerr, delta_uref} not interms of x_ref.
@@ -645,7 +660,7 @@ def main(args=None):
         X_high = torch.tensor(np.concatenate([X_MAX, X_MAX, U_MAX]).reshape(1,-1)).type(X.dtype)
         # print("X_low: ", X_low)
         ############## Sanity check: loss before perturbations
-        batch_loss_uptbd, p1_uptbd, p2, l3, _ = forward( 
+        batch_losses_uptbd, p1_uptbd, p2, l3, _ = forward( 
             X[:, 0:num_dim_x].unsqueeze(-1),
             X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1),
             X[:, (2*num_dim_x):].unsqueeze(-1),
@@ -657,6 +672,7 @@ def main(args=None):
             zero_order=False,
             reduce=False # key to computing loss value for every example in the batch
         )
+        batch_loss_uptbd = batch_losses_uptbd[0]
         ##############
         for _ in range(restarts):
             # Initialize deltas to uniform random in 2*eps*range of each variable centered at center of range
@@ -687,7 +703,7 @@ def main(args=None):
                 # print("xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
                 
                 # compute the loss
-                loss, p1, p2, l3, _ = forward( #  this computes a scaler loss
+                losses, p1, p2, l3, _ = forward( #  this computes a scaler loss
                     x_ptb,
                     xref_ptb,
                     uref_ptb,
@@ -698,6 +714,9 @@ def main(args=None):
                     clone=clone,
                     zero_order=False,
                 )
+                ##################################
+                loss = losses[0] # only use Q loss
+                ##################################
                 # compute gradients
                 loss.backward()
                 grad = delta.grad.detach()
@@ -736,7 +755,7 @@ def main(args=None):
             xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
             uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
             # compute the loss
-            batch_loss, p1, p2, l3, _ = forward(
+            batch_losses, p1, p2, l3, _ = forward(
                 x_ptb,
                 xref_ptb,
                 uref_ptb,
@@ -748,13 +767,14 @@ def main(args=None):
                 zero_order=False,
                 reduce=False # key to computing loss value for every example in the batch
             )
+            batch_loss = batch_losses[0] # only use Q loss
             # store largest delta values
             max_delta[batch_loss >= max_loss] = delta.detach()[batch_loss >= max_loss]
             max_loss = torch.max(max_loss, batch_loss)
 
             # ### Sanity check: check which data points for which the loss increased
             num_succ_att = (max_loss > batch_loss_uptbd).sum()
-            print("Number of successfully increased loss points: ", num_succ_att, " out of batch: ", X.shape[0])
+            # print("Number of successfully increased loss points: ", num_succ_att, " out of batch: ", X.shape[0])
             # ###
 
             # ### Sanity check: What is range of all vars?
@@ -783,19 +803,20 @@ def main(args=None):
             x_ptb =x_ptb.unsqueeze(-1)
             xref_ptb = xref_ptb.unsqueeze(-1)
             xerr_ptb = xerr_ptb.unsqueeze(-1)
-            batch_loss, p1, p2, l3, _ = forward(
+            _, p1, p2, l3, _ = forward(
                 x_ptb,
                 xref_ptb,
                 uref_ptb,
                 _lambda=args._lambda,
-                verbose=True,
+                verbose=False,
                 acc=True,
                 detach=detach,
                 clone=clone,
                 zero_order=False,
                 reduce=False # key to computing loss value for every example in the batch
             )
-            print(f"Number of points with eigval  < 0 (passing) before attack {p1_uptbd.sum()} vs after: {p1.sum()} out of {X.shape[0]}")
+            if verbose:
+                print(f"Number of points with eigval  < 0 (passing) before attack {p1_uptbd.sum()} vs after: {p1.sum()} out of {X.shape[0]}")
             num_new_CE = np.logical_and(p1_uptbd == True, p1 == False).sum()
             num_lost_CE = np.logical_and(p1_uptbd == False, p1 == True).sum()
             stats= Stats(num_new_CE, num_lost_CE)
@@ -812,7 +833,8 @@ def main(args=None):
         acc=False,
         detach=False,
         clone=False,
-        ptb_sched=None
+        ptb_sched=None,
+        reg_coeff=0.0
     ):  
         """
         This function implements 1 epoch of training with PGD attack
@@ -886,7 +908,7 @@ def main(args=None):
             xref_ptb = xref + delta[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
             uref_ptb = uref + delta[:, (2*num_dim_x):].unsqueeze(-1)
 
-            loss, p1, p2, l3, _ = forward(
+            losses, p1, p2, l3, _ = forward(
                 x_ptb,
                 xref_ptb,
                 uref_ptb,
@@ -897,6 +919,11 @@ def main(args=None):
                 clone=clone,
                 zero_order=False,
             )
+
+            if reg_coeff > 0.0:
+                losses.append(regularize(epoch, reg_coeff))
+
+            loss = sum(losses)
 
             start = time.time()
             if train and not clone:
@@ -932,9 +959,15 @@ def main(args=None):
         acc=False,
         detach=False,
         clone=False,
-        epoch=0.,
-        reg_coeff=args.reg_coeff
-    ):  # trainval a set of x
+        epoch=1.,
+        reg_coeff=args.reg_coeff,
+        ptb_sched=None,
+        robust=False,
+    ):  
+        """
+        This function implements 1 epoch of training with or without PGD attack.
+        """
+        # trainval a set of x
         # torch.autograd.set_detect_anomaly(True)
 
         if train:
@@ -942,19 +975,26 @@ def main(args=None):
         else:
             indices = np.array(list(range(len(X))))
 
+        total_num_new_CEs = 0
+        total_num_lost_CEs = 0
         total_loss = 0
         total_p1 = 0
         total_p2 = 0
         total_l3 = 0
-        eigmin = 0.0
+        eigmin = 1e6
         eigmax = 0.0
         eigmean = 0.0
+        Meigmin = 1e6 
+        Meigmax = 0.0 
+        Meigcondmax = 0.0
+
+        num_train_batches = len(X) // bs
 
         if train:
             # print("len(X):", len(X), ", bs: ", bs)
-            _iter = tqdm(range(len(X) // bs))
+            _iter = tqdm(range(num_train_batches))
         else:
-            _iter = range(len(X) // bs)
+            _iter = range(num_train_batches)
         for b in _iter:
             start = time.time()
             x = []
@@ -978,8 +1018,29 @@ def main(args=None):
             x = x.requires_grad_()
 
             start = time.time()
+            if robust:
+                robust_eps_i = ptb_sched(epoch + (b + 1)/num_train_batches)
+                if robust_eps_i > 0:
+                    delta, stats = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
+                                    robust_eps_i,
+                                    args.robust_alpha, 
+                                    args.robust_attack_iters,
+                                    args.robust_restarts,
+                                    args.robust_norm,
+                                        train,
+                                        acc,
+                                        detach,
+                                        clone)
+                    total_num_new_CEs += stats.num_new_CEs 
+                    total_num_lost_CEs += stats.num_lost_CEs
+                else:
+                    delta = torch.zeros_like(torch.concatenate([x, xref, uref], dim=1).squeeze(-1))
+                    
+                x = x + delta[:,0:num_dim_x].unsqueeze(-1)
+                xref = xref + delta[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
+                uref = uref + delta[:, (2*num_dim_x):].unsqueeze(-1)
 
-            loss, p1, p2, l3, stats = forward(
+            losses, p1, p2, l3, stats = forward(
                 x,
                 xref,
                 uref,
@@ -988,32 +1049,45 @@ def main(args=None):
                 acc=acc,
                 detach=detach,
                 clone=clone,
-                zero_order=False,
+                zero_order=False,      
             )
 
             if reg_coeff > 0.0:
-                loss += regularize(epoch, reg_coeff)
+                losses.append(regularize(epoch, reg_coeff))
+
+            sum_loss = sum(losses)
 
             start = time.time()
             if train and not clone:
                 optimizer.zero_grad()
-                loss.backward()
+                sum_loss.backward()
                 optimizer.step()
                 # print('backwad(): %.3f s'%(time.time() - start))
             elif train and clone:
                 hardtanh_optimizer.zero_grad()
-                loss.backward()
+                sum_loss.backward()
                 hardtanh_optimizer.step()
 
-            total_loss += loss.item() * x.shape[0]
+            # print("sum_loss.item(): ", sum_loss.item())
+            total_loss += sum_loss.item() * x.shape[0]
+            # print("total_loss:", total_loss)
             if acc:
                 total_p1 += p1.sum()
                 total_p2 += p2.sum()
                 total_l3 += l3 * x.shape[0]
-                eigmin  = np.minimum(stats.min, eigmin)
-                eigmax = np.maximum(stats.max, eigmax)
-                eigmean = (b*eigmean + stats.mean)/(b+1)
-        return total_loss / len(X), total_p1 / len(X), total_p2 / len(X), total_l3 / len(X), EigStats(eigmax, eigmin, eigmean)
+                eigstats, Meigstats = stats
+                eigmin  = np.minimum(eigstats.min, eigmin)
+                eigmax = np.maximum(eigstats.max, eigmax)
+                eigmean = (b*eigmean + eigstats.mean)/(b+1)
+                Meigmin = np.minimum(Meigstats.min, Meigmin) 
+                Meigmax = np.maximum(Meigstats.max, Meigmax)
+                Meigcondmax = np.maximum(Meigstats.cond_max, Meigcondmax)
+        if robust:
+            print("robust_eps_i at epoch end was: ", robust_eps_i)
+        eigstats = EigStats(eigmax, eigmin, eigmean)
+        meigstats = MeigStats(Meigmax, Meigmin, Meigcondmax)
+        CE_stats = Stats(total_num_new_CEs, total_num_lost_CEs) 
+        return total_loss / len(X), total_p1 / len(X), total_p2 / len(X), total_l3 / len(X), (eigstats, meigstats, CE_stats, losses)
 
 
     best_acc = 0
@@ -1164,46 +1238,79 @@ def main(args=None):
             "Eigenvalues": ["Multiline", ["eig/max", "eig/min", "eig/mea"]],
         },
     }
+    layout2 = {
+        "M_Eigen": {
+            "M_Eigen": ["multiline", ["Meig/max", "Meig/min", "Meig/condmax"]],
+        },
+    }
+    layout3 = {
+        "Loss_Terms": {
+            "Loss_Terms": ["multiline", ["loss/Q", "loss/C1", "loss/W"]],
+        },
+    }
+
     writer.add_custom_scalars(layout)
+    writer.add_custom_scalars(layout2)
+    writer.add_custom_scalars(layout3)
 
     # perturbation schedule for robust training
     ptb_schedule = lambda t: np.interp([t], [0, 1.5, args.epochs // 3, args.epochs * 2 // 3, args.epochs], [0.0, 0.0, args.robust_eps/2., args.robust_eps/1.2, args.robust_eps])[0]
     # Start training a tanh network
+    print("Using robust training: ", args.robust_train)
     for epoch in range(args.epochs):
         adjust_learning_rate(optimizer, epoch)
-        if args.robust_train:
-            print("Using adversarial training.")
-            loss, p1_train, _, _, extra_train = robust_trainval(X_tr,
-                                            epoch,
-                            train=True,
-                            _lambda=args._lambda,
-                            acc=False,
-                            detach=True if epoch < args.lr_step else False,
-                            ptb_sched = ptb_schedule,
-                        )
-            CE_train, eig_train = extra_train
-            writer.add_scalar("number new CE from training", CE_train.num_new_CEs, epoch)
-            writer.add_scalar("number lost CE from training", CE_train.num_lost_CEs, epoch)
-        else:
-            print("Using vanilla training.")
-            loss, _, _, _, _ = trainval(X_tr,
+        # if args.robust_train:
+        #     print("Using adversarial training.")
+        #     loss, p1_train, _, _, extra_train = robust_trainval(X_tr,
+        #                                     epoch,
+        #                     train=True,
+        #                     _lambda=args._lambda,
+        #                     acc=False,
+        #                     detach=True if epoch < args.lr_step else False,
+        #                     ptb_sched = ptb_schedule,
+        #                 )
+        #     CE_train, eig_train = extra_train
+        #     writer.add_scalar("number new CE from training", CE_train.num_new_CEs, epoch)
+        #     writer.add_scalar("number lost CE from training", CE_train.num_lost_CEs, epoch)
+        # else:
+            # print("Using vanilla training.")
+        loss, _, _, _, train_stats = trainval(X_tr,
                                     train=True,
                                     _lambda=args._lambda,
                                     acc=False,
                                     detach=True if epoch < args.lr_step else False,
-                                    epoch=epoch
+                                    epoch=epoch,
+                                    ptb_sched = ptb_schedule,
+                                    robust=args.robust_train
                                 )
+        _, _, CE_stats, _ = train_stats
+        if args.robust_train:
+            writer.add_scalar("number new CE from training", CE_stats.num_new_CEs, epoch)
+            writer.add_scalar("number lost CE from training", CE_stats.num_lost_CEs, epoch)
         print("Training loss: ", loss)
-        loss, p1, p2, l3, extra_test = trainval(X_te, train=False, _lambda=0.0, acc=True, detach=False)
+        # now test
+        loss, p1, p2, l3, test_stats = trainval(X_te, train=False, _lambda=0.0, acc=True, detach=False)
         print("Epoch %d: Testing loss/p1/p2/l3: " % epoch, loss, p1, p2, l3)
+        eig_stats, meig_stats, CE_stats, losses = test_stats
+        if len(losses) == 4:
+            loss_Q, loss_C1, loss_W, loss_C2 = losses
+        elif len(losses) == 5:
+            loss_Q, loss_C1, loss_W, loss_C2, loss_reg = losses
+            writer.add_scalar("Regularization loss", loss_reg, epoch)
 
         writer.add_scalar("Loss", loss, epoch)
         writer.add_scalar("% of pts with max eig Q < 0", p1, epoch)
         writer.add_scalar("% of pts with max eig C1_LHS < 0", p2, epoch)
-        writer.add_scalar("eig/max", extra_test.max, epoch)
-        writer.add_scalar("eig/min", extra_test.min, epoch)
-        writer.add_scalar("eig/mean", extra_test.mean, epoch) 
+        writer.add_scalar("eig/max", eig_stats.max, epoch)
+        writer.add_scalar("eig/min", eig_stats.min, epoch)
+        writer.add_scalar("eig/mean", eig_stats.mean, epoch) 
+        writer.add_scalar("Meig/max", meig_stats.max, epoch)
+        writer.add_scalar("Meig/min", meig_stats.min, epoch)
+        writer.add_scalar("Meig/condmax", meig_stats.cond_max, epoch)
         writer.add_scalar("mean C2^2", l3, epoch)
+        writer.add_scalar("loss/Q", loss_Q, epoch)
+        writer.add_scalar("loss/C1", loss_C1, epoch)
+        writer.add_scalar("loss/W", loss_W, epoch)
 
         if p1 + p2 >= best_acc:
             best_acc = p1 + p2
