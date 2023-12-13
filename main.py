@@ -83,7 +83,7 @@ def cmdlineparse(args):
         "--robust_eps",
         dest="robust_eps",
         type=float,
-        default=0.5,
+        default=0.1,
         help="Perturbation bound for adversarial training.",
     )
     parser.add_argument(
@@ -104,7 +104,7 @@ def cmdlineparse(args):
         "--robust_attack_iters",
         dest="robust_attack_iters",
         type=int,
-        default=10,
+        default=2,
         help="Number of iterations to create adversarial example during robust training.",
     )
     parser.add_argument(
@@ -803,7 +803,7 @@ def main(args=None):
             x_ptb =x_ptb.unsqueeze(-1)
             xref_ptb = xref_ptb.unsqueeze(-1)
             xerr_ptb = xerr_ptb.unsqueeze(-1)
-            _, p1, p2, l3, _ = forward(
+            _, p1, p2, l3, CEstats = forward(
                 x_ptb,
                 xref_ptb,
                 uref_ptb,
@@ -819,136 +819,139 @@ def main(args=None):
                 print(f"Number of points with eigval  < 0 (passing) before attack {p1_uptbd.sum()} vs after: {p1.sum()} out of {X.shape[0]}")
             num_new_CE = np.logical_and(p1_uptbd == True, p1 == False).sum()
             num_lost_CE = np.logical_and(p1_uptbd == False, p1 == True).sum()
+            Meig_stats, Qeig_stats = CEstats
+            if verbose:
+                print("max eigvalue after attack: ", Qeig_stats.max)
             stats= Stats(num_new_CE, num_lost_CE)
             
             # print("after attack: xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
         return max_delta, stats
 
-    def robust_trainval(
-        X,
-        epoch,
-        bs=args.bs,
-        train=True,
-        _lambda=args._lambda,
-        acc=False,
-        detach=False,
-        clone=False,
-        ptb_sched=None,
-        reg_coeff=0.0
-    ):  
-        """
-        This function implements 1 epoch of training with PGD attack
-        """
+    # def robust_trainval(
+    #     X,
+    #     epoch,
+    #     bs=args.bs,
+    #     train=True,
+    #     _lambda=args._lambda,
+    #     acc=False,
+    #     detach=False,
+    #     clone=False,
+    #     ptb_sched=None,
+    #     reg_coeff=0.0
+    # ):  
+    #     """
+    #     This function implements 1 epoch of training with PGD attack
+    #     """
 
-        if train:
-            indices = np.random.permutation(len(X))
-        else:
-            indices = np.array(list(range(len(X))))
+    #     if train:
+    #         indices = np.random.permutation(len(X))
+    #     else:
+    #         indices = np.array(list(range(len(X))))
 
-        total_loss = 0
-        total_p1 = 0
-        total_p2 = 0
-        total_l3 = 0
-        total_num_new_CEs = 0
-        total_num_lost_CEs = 0
-        eigmin = 0.0
-        eigmax = 0.0
-        eigmean = 0.0
+    #     total_loss = 0
+    #     total_p1 = 0
+    #     total_p2 = 0
+    #     total_l3 = 0
+    #     total_num_new_CEs = 0
+    #     total_num_lost_CEs = 0
+    #     eigmin = 0.0
+    #     eigmax = 0.0
+    #     eigmean = 0.0
 
-        num_train_batches = len(X) // bs
-        if train:
-            # print("len(X):", len(X), ", bs: ", bs)
-            _iter = tqdm(range(num_train_batches))
-        else:
-            _iter = range(num_train_batches)
-        for b in _iter:
-            # for each batch
-            start = time.time()
-            x = []
-            xref = []
-            uref = []
-            for id in indices[b * bs : (b + 1) * bs]:
-                if args.use_cuda:
-                    x.append(torch.from_numpy(X[id][0]).float().cuda())
-                    xref.append(torch.from_numpy(X[id][1]).float().cuda())
-                    uref.append(torch.from_numpy(X[id][2]).float().cuda())
-                elif use_mps:
-                    x.append(torch.from_numpy(X[id][0]).float().to("mps"))
-                    xref.append(torch.from_numpy(X[id][1]).float().to("mps"))
-                    uref.append(torch.from_numpy(X[id][2]).float().to("mps"))
-                else:
-                    x.append(torch.from_numpy(X[id][0]).float())
-                    xref.append(torch.from_numpy(X[id][1]).float())
-                    uref.append(torch.from_numpy(X[id][2]).float())
+    #     num_train_batches = len(X) // bs
+    #     if train:
+    #         # print("len(X):", len(X), ", bs: ", bs)
+    #         _iter = tqdm(range(num_train_batches))
+    #     else:
+    #         _iter = range(num_train_batches)
+    #     for b in _iter:
+    #         # for each batch
+    #         start = time.time()
+    #         x = []
+    #         xref = []
+    #         uref = []
+    #         for id in indices[b * bs : (b + 1) * bs]:
+    #             if args.use_cuda:
+    #                 x.append(torch.from_numpy(X[id][0]).float().cuda())
+    #                 xref.append(torch.from_numpy(X[id][1]).float().cuda())
+    #                 uref.append(torch.from_numpy(X[id][2]).float().cuda())
+    #             elif use_mps:
+    #                 x.append(torch.from_numpy(X[id][0]).float().to("mps"))
+    #                 xref.append(torch.from_numpy(X[id][1]).float().to("mps"))
+    #                 uref.append(torch.from_numpy(X[id][2]).float().to("mps"))
+    #             else:
+    #                 x.append(torch.from_numpy(X[id][0]).float())
+    #                 xref.append(torch.from_numpy(X[id][1]).float())
+    #                 uref.append(torch.from_numpy(X[id][2]).float())
 
-            x, xref, uref = (torch.stack(d).detach() for d in (x, xref, uref))
-            x = x.requires_grad_()
+    #         x, xref, uref = (torch.stack(d).detach() for d in (x, xref, uref))
+    #         x = x.requires_grad_()
 
-            start = time.time()
-            # print("x.shape: ", x.shape)
-            # print("X.shape, ", torch.concatenate([x, xref, uref], dim=1).shape)
-            robust_eps_i = ptb_sched(epoch + (b + 1)/num_train_batches)
-            if robust_eps_i > 0:
-                delta, stats = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
-                                robust_eps_i,
-                                args.robust_alpha, 
-                                args.robust_attack_iters,
-                                args.robust_restarts,
-                                args.robust_norm,
-                                    train,
-                                    acc,
-                                    detach,
-                                    clone)
-                total_num_new_CEs += stats.num_new_CEs 
-                total_num_lost_CEs += stats.num_lost_CEs
-            else:
-                delta = torch.zeros_like(torch.concatenate([x, xref, uref], dim=1).squeeze(-1))
+    #         start = time.time()
+    #         # print("x.shape: ", x.shape)
+    #         # print("X.shape, ", torch.concatenate([x, xref, uref], dim=1).shape)
+    #         robust_eps_i = ptb_sched(epoch + (b + 1)/num_train_batches)
+    #         if robust_eps_i > 0:
+    #             delta, stats = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
+    #                             robust_eps_i,
+    #                             args.robust_alpha, 
+    #                             args.robust_attack_iters,
+    #                             args.robust_restarts,
+    #                             args.robust_norm,
+    #                                 train,
+    #                                 acc,
+    #                                 detach,
+    #                                 clone)
+    #             total_num_new_CEs += stats.num_new_CEs 
+    #             total_num_lost_CEs += stats.num_lost_CEs
+    #         else:
+    #             delta = torch.zeros_like(torch.concatenate([x, xref, uref], dim=1).squeeze(-1))
             
-            x_ptb = x + delta[:,0:num_dim_x].unsqueeze(-1)
-            xref_ptb = xref + delta[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
-            uref_ptb = uref + delta[:, (2*num_dim_x):].unsqueeze(-1)
+    #         x_ptb = x + delta[:,0:num_dim_x].unsqueeze(-1)
+    #         xref_ptb = xref + delta[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
+    #         uref_ptb = uref + delta[:, (2*num_dim_x):].unsqueeze(-1)
 
-            losses, p1, p2, l3, _ = forward(
-                x_ptb,
-                xref_ptb,
-                uref_ptb,
-                _lambda=_lambda,
-                verbose=False if not train else False,
-                acc=acc,
-                detach=detach,
-                clone=clone,
-                zero_order=False,
-            )
+    #         losses, p1, p2, l3, _ = forward(
+    #             x_ptb,
+    #             xref_ptb,
+    #             uref_ptb,
+    #             _lambda=_lambda,
+    #             verbose=False if not train else False,
+    #             acc=acc,
+    #             detach=detach,
+    #             clone=clone,
+    #             zero_order=False,
+    #         )
 
-            if reg_coeff > 0.0:
-                losses.append(regularize(epoch, reg_coeff))
+    #         if reg_coeff > 0.0:
+    #             losses.append(regularize(epoch, reg_coeff))
 
-            loss = sum(losses)
+    #         loss = sum(losses)
 
-            start = time.time()
-            if train and not clone:
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                # print('backwad(): %.3f s'%(time.time() - start))
-            elif train and clone:
-                hardtanh_optimizer.zero_grad()
-                loss.backward()
-                hardtanh_optimizer.step()
+    #         start = time.time()
+    #         if train and not clone:
+    #             optimizer.zero_grad()
+    #             loss.backward()
+    #             optimizer.step()
+    #             # print('backwad(): %.3f s'%(time.time() - start))
+    #         elif train and clone:
+    #             hardtanh_optimizer.zero_grad()
+    #             loss.backward()
+    #             hardtanh_optimizer.step()
 
-            total_loss += loss.item() * x.shape[0]
-            if acc:
-                total_p1 += p1.sum()
-                total_p2 += p2.sum()
-                total_l3 += l3 * x.shape[0]
-                eigmin  = np.minimum(stats.min, eigmin)
-                eigmax = np.maximum(stats.max, eigmax)
-                eigmean = (b*eigmean + stats.mean)/(b+1)
-        print("robust_eps_i at epoch end was: ", robust_eps_i)
-        # extra: max/min eig vals? inc/dec in # CEs
-        CEstats = Stats(total_num_new_CEs, total_num_lost_CEs)
-        eigstats = EigStats(eigmax, eigmin, eigmean)
-        return total_loss / len(X), total_p1 / len(X), total_p2 / len(X), total_l3 / len(X), (CEstats, eigstats)
+    #         total_loss += loss.item() * x.shape[0]
+    #         if acc:
+    #             total_p1 += p1.sum()
+    #             total_p2 += p2.sum()
+    #             total_l3 += l3 * x.shape[0]
+    #             eigmin  = np.minimum(stats.min, eigmin)
+    #             eigmax = np.maximum(stats.max, eigmax)
+    #             eigmean = (b*eigmean + stats.mean)/(b+1)
+    #     print("robust_eps_i at epoch end was: ", robust_eps_i)
+    #     # extra: max/min eig vals? inc/dec in # CEs
+    #     CEstats = Stats(total_num_new_CEs, total_num_lost_CEs)
+    #     eigstats = EigStats(eigmax, eigmin, eigmean)
+    #     return total_loss / len(X), total_p1 / len(X), total_p2 / len(X), total_l3 / len(X), (CEstats, eigstats)
 
 
     def trainval(
@@ -963,6 +966,7 @@ def main(args=None):
         reg_coeff=args.reg_coeff,
         ptb_sched=None,
         robust=False,
+        verbose=False
     ):  
         """
         This function implements 1 epoch of training with or without PGD attack.
@@ -1030,9 +1034,10 @@ def main(args=None):
                                         train,
                                         acc,
                                         detach,
-                                        clone)
+                                        clone,
+                                        verbose=verbose)
                     total_num_new_CEs += stats.num_new_CEs 
-                    total_num_lost_CEs += stats.num_lost_CEs
+                    total_num_lost_CEs += stats.num_lost_CEs                   
                 else:
                     delta = torch.zeros_like(torch.concatenate([x, xref, uref], dim=1).squeeze(-1))
                     
@@ -1233,11 +1238,16 @@ def main(args=None):
 
         sys.exit()
 
-    layout = {
+    layout0 = {
         "Eigenvalues":{
             "Eigenvalues": ["Multiline", ["eig/max", "eig/min", "eig/mea"]],
         },
     }
+    # layout1 = {
+    #     "TrainEigenvalues":{
+    #         "TrainEigenvalues": ["Multiline", ["traineig/max", "traineig/min", "traineig/mea"]],
+    #     },
+    # }
     layout2 = {
         "M_Eigen": {
             "M_Eigen": ["multiline", ["Meig/max", "Meig/min", "Meig/condmax"]],
@@ -1249,12 +1259,13 @@ def main(args=None):
         },
     }
 
-    writer.add_custom_scalars(layout)
+    writer.add_custom_scalars(layout0)
+    # writer.add_custom_scalars(layout1)
     writer.add_custom_scalars(layout2)
     writer.add_custom_scalars(layout3)
 
     # perturbation schedule for robust training
-    ptb_schedule = lambda t: np.interp([t], [0, 1.5, args.epochs // 3, args.epochs * 2 // 3, args.epochs], [0.0, 0.0, args.robust_eps/2., args.robust_eps/1.2, args.robust_eps])[0]
+    ptb_schedule = lambda t: np.interp([t], [0, 1.5, args.epochs // 3, args.epochs * 2 // 3, args.epochs], [0.0, 0.0, args.robust_eps/2., args.robust_eps/2., args.robust_eps])[0]
     # Start training a tanh network
     print("Using robust training: ", args.robust_train)
     for epoch in range(args.epochs):
@@ -1288,8 +1299,18 @@ def main(args=None):
             writer.add_scalar("number new CE from training", CE_stats.num_new_CEs, epoch)
             writer.add_scalar("number lost CE from training", CE_stats.num_lost_CEs, epoch)
         print("Training loss: ", loss)
+        # writer.add_scalar("traineig/max", train_eig_stats.max, epoch)
+        # writer.add_scalar("traineig/min", train_eig_stats.min, epoch)
+        # writer.add_scalar("traineig/mean", train_eig_stats.mean, epoch) 
         # now test
-        loss, p1, p2, l3, test_stats = trainval(X_te, train=False, _lambda=0.0, acc=True, detach=False)
+        loss, p1, p2, l3, test_stats = trainval(X_te, 
+                                                train=False, 
+                                                _lambda=args._lambda, 
+                                                acc=True, 
+                                                detach=False, 
+                                                epoch=epoch,
+                                                ptb_sched = ptb_schedule, 
+                                                robust=args.robust_train)
         print("Epoch %d: Testing loss/p1/p2/l3: " % epoch, loss, p1, p2, l3)
         eig_stats, meig_stats, CE_stats, losses = test_stats
         if len(losses) == 4:
@@ -1321,6 +1342,8 @@ def main(args=None):
                 {
                     "args": args,
                     "precs": (loss, p1, p2),
+                    "eigstats": eig_stats,
+                    "M_eigstats": meig_stats,
                     "model_W": model_W.state_dict(),
                     "model_Wbot": model_Wbot.state_dict(),
                     "model_u_w1": model_u_w1.state_dict(),
