@@ -8,6 +8,8 @@ use_mps = False
 #     torch.set_default_device('mps')
 #     use_mps = True
 
+from torch.utils.data import Dataset, DataLoader
+from data_loading import TrackingDataset
 import importlib
 import numpy as np
 import time
@@ -57,7 +59,10 @@ def cmdlineparse(args):
     parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs.")
     parser.add_argument("--lr_step", type=int, default=5, help="")
     parser.add_argument(
-        "--lambda", type=float, dest="_lambda", default=1.0, help="Convergence rate: lambda"
+        "--lambda", type=float, dest="_lambda", default=1.0, help="training convergence rate: lambda"
+    )
+    parser.add_argument(
+        "--lambda_test", type=float, dest="test_lambda", default=1.0, help="test convergence rate: lambda"
     )
     parser.add_argument(
         "--w_ub",
@@ -116,12 +121,42 @@ def cmdlineparse(args):
         default=0.0,
         help="Regularization coefficient. Reasonable value might be .0001.",
     )
+    parser.add_argument(
+        "--M_width",
+        dest="M_width",
+        type=int,
+        default=128,
+        help="Width of the metric network.",
+    )
+    parser.add_argument(
+        "--M_depth",
+        dest="M_depth",
+        type=int,
+        default=2,
+        help="Depth of the metric network.",
+    )
+    parser.add_argument(
+        "--u_width",
+        dest="u_width",
+        type=int,
+        default=128,
+        help="Width of the control network.",
+    )
+    parser.add_argument(
+        "--u_depth",
+        dest="u_depth",
+        type=int,
+        default=2,
+        help="Depth of the control network.",
+    )
     args = parser.parse_args(args)
     return args
 
 def main(args=None):
     # pdb.set_trace()
     args = cmdlineparse(args)
+    if not os.path.isdir(args.log):
+        os.mkdir(args.log)
     if not args.load_model:
         os.system("cp *.py " + args.log)
         os.system("cp -r models/ " + args.log)
@@ -133,7 +168,7 @@ def main(args=None):
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     epsilon = args._lambda
-    print("Epsilon: ", epsilon)
+    print("Epsilon/Lambda: ", epsilon, " test eps/lamb: ", args.test_lambda)
     if args.reg_coeff > 0.0:
         print("Using l1 regularization with coeff: ", args.reg_coeff)
 
@@ -153,6 +188,26 @@ def main(args=None):
     if hasattr(system, "Bbot_func"):
         Bbot_func = system.Bbot_func
 
+
+    #########
+    # load data
+    if args.use_cuda:
+        generator=torch.Generator(device='cuda')
+    else:
+        generator=torch.Generator(device='cpu')    
+    X_tr = TrackingDataset(args.num_train, config, system, args, use_mps=use_mps)
+    X_tr_DL = DataLoader(X_tr, batch_size=args.bs, shuffle=True, generator=generator)
+    X_te = TrackingDataset(args.num_test, config, system, args, use_mps=use_mps)
+    X_te_DL = DataLoader(X_te, batch_size=args.bs, shuffle=True, generator=generator)
+    print(type(X_tr_DL))
+    # for i_batch, sample_batched in enumerate(dataloader):
+    #     if i_batch == 0:
+    #         print(i_batch, sample_batched[0][0].shape,
+    #                        sample_batched[0][1].shape,
+    #                        sample_batched[0][2].shape)
+    #     assert 1==0
+    #########
+
     model = importlib.import_module("model_" + args.task)
     get_model = model.get_model
     INVERSE_METRIC = model.INVERSE_METRIC
@@ -168,7 +223,8 @@ def main(args=None):
         model_u_w1_hard,
         W_func_hard,
         u_func_hard,
-    ) = get_model(num_dim_x, num_dim_control, w_lb=args.w_lb, use_cuda=args.use_cuda)
+    ) = get_model(num_dim_x, num_dim_control, w_lb=args.w_lb, use_cuda=args.use_cuda,
+                  M_width=args.M_width, M_depth=args.M_depth, u_width=args.u_width, u_depth=args.u_depth)
 
     if use_mps:
         print("casting to mps again")
@@ -177,34 +233,6 @@ def main(args=None):
         model_u_w1 = model_u_w1.to("mps")
         u_func = u_func.to("mps")
         W_func = W_func.to("mps")
-
-    # constructing datasets
-    def sample_xef():
-        return (X_MAX - X_MIN) * np.random.rand(num_dim_x, 1) + X_MIN
-
-
-    def sample_x(xref):
-        xe = (XE_MAX - XE_MIN) * np.random.rand(num_dim_x, 1) + XE_MIN
-        x = xref + xe
-        x[x > X_MAX] = X_MAX[x > X_MAX]
-        x[x < X_MIN] = X_MIN[x < X_MIN]
-        return x
-
-
-    def sample_uref():
-        return (U_MAX - U_MIN) * np.random.rand(num_dim_control, 1) + U_MIN
-
-
-    def sample_full():
-        xref = sample_xef()
-        uref = sample_uref()
-        x = sample_x(xref)
-        return (x, xref, uref)
-
-
-    X_tr = [sample_full() for _ in range(args.num_train)]
-    X_te = [sample_full() for _ in range(args.num_test)]
-    print(type(X_tr))
 
     if "Bbot_func" not in locals():
 
@@ -369,6 +397,26 @@ def main(args=None):
             # print("loss dim: ", neg_mean.shape)
             return -1.0 * neg_mean
 
+    def gersh_criterion(A):
+        A = A.squeeze(-1) # remove trailing 1 dim
+        diagonal_entries = torch.diagonal(A, dim1=-2, dim2=-1)
+        off_diagonal_sum = torch.abs(A).sum(dim=-1) - torch.abs(diagonal_entries)
+        gersh_LBs = diagonal_entries - off_diagonal_sum # want this to be >0
+        gersh_LB = gersh_LBs.amin(dim=-1)
+        return gersh_LB
+    
+    def gershgorin_loss(A, reduce=True):
+        gersh_LB = gersh_criterion(A)
+        # print("gersh_LB.shape: ", gersh_LB.shape)
+        negative_index = gersh_LB < 0
+        if reduce:
+            if negative_index.sum() > 0:
+                return -1 * gersh_LB[negative_index].mean()
+            else:
+                return 0.0
+        else:
+            gersh_LB[torch.logical_not(negative_index)] = 0.0
+            return -1 * gersh_LB
 
     def loss_pos_matrix_eigen_values(A):
         # A: bs x d x d
@@ -407,6 +455,7 @@ def main(args=None):
 
         _Bbot = Bbot_func(x)
         u = u_func(x, x - xref, uref)  # u: bs x m x 1 # TODO: x - xref
+        # print("u: ", u)
 
         # If clone is set, train the hardtanh networks to match the tanh networks
         if clone:
@@ -498,17 +547,23 @@ def main(args=None):
             C2_inners.append(C2_inner)
             C2s.append(C2)
 
-        # if reduce:
-        #     # compute a scalar loss
-        #     loss = 0
-        # else:
-        #     # compute a loss value for every data point in batch
-        #     loss = torch.zeros(x.shape[0])
-        loss_Q = loss_pos_matrix_random_sampling(
-            -Contraction
-            - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
-            reduce=reduce
-        )
+        ts = time.time()
+        # loss_Q1 = loss_pos_matrix_random_sampling(
+        #     -Contraction
+        #     - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
+        #     reduce=reduce
+        # )
+        # # tf = time.time()
+        loss_Q = gershgorin_loss(-Contraction,  
+            reduce=reduce)
+        # loss_Q = loss_Q1 + loss_Q2
+        # trueigs = torch.linalg.eigvalsh(Contraction).max(dim=1)[0]
+        # # print("true eigs: ", trueigs.shape, trueigs)
+        # loss_Q3 = (trueigs[trueigs > 0]).mean()
+        # print("loss_Q: ", loss_Q.shape, loss_Q)
+        # loss_Q = loss_Q1 + loss_Q2 + loss_Q3
+        tf = time.time()
+
         loss_C1 = loss_pos_matrix_random_sampling(
             -C1_LHS_1 - epsilon * torch.eye(C1_LHS_1.shape[-1]).unsqueeze(0).type(x.dtype),
             reduce=reduce
@@ -541,9 +596,15 @@ def main(args=None):
                 # + (A + B.matmul(K)).transpose(1, 2).matmul(M.detach())
                 # + M.detach().matmul(A + B.matmul(K))
                 # + 2 * _lambda/2 * M.detach())
-            true_eig_min = torch.linalg.eigh(Contraction)[0].min(dim=1)[0].min().item()
-            true_eig_max = torch.linalg.eigh(Contraction)[0].max(dim=1)[0].max().item()
-            true_eig_mean = torch.linalg.eigh(Contraction)[0].mean().item()
+            Q_eigs = torch.linalg.eigvalsh(Contraction)
+            true_eig_min = Q_eigs.min(dim=1)[0].min().item()
+            true_eig_max = Q_eigs.max(dim=1)[0].max().item()
+            true_eig_mean = Q_eigs.mean().item()
+
+            Q_eigbounds = -gersh_criterion(-Contraction) # upperbound with the negations like that
+            Q_eigbounds_min = Q_eigbounds.min().item()
+            Q_eigbounds_max = Q_eigbounds.max().item()
+            Q_eigbounds_mean = Q_eigbounds.mean().item()
 
             M_eigs = torch.linalg.eigh(M)[0]
             M_eigs_min = M_eigs.min(dim=1)[0] # max eig for each datapoint in batch
@@ -554,7 +615,7 @@ def main(args=None):
             # p1 is the number of datapoints where all the eigenvalues are < 0 
             return (
                 loss,
-                ((torch.linalg.eigh(Contraction)[0] >= 0).sum(dim=1) == 0)
+                ((Q_eigs >= 0).sum(dim=1) == 0)
                 .cpu()
                 .detach()
                 .numpy(),
@@ -563,10 +624,12 @@ def main(args=None):
                     [1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s]
                 ).item(),
                 (EigStats(true_eig_max, true_eig_min, true_eig_mean),
-                 MeigStats(M_eig_max, M_eig_min, M_cond_max)),
+                 MeigStats(M_eig_max, M_eig_min, M_cond_max),
+                 EigStats(Q_eigbounds_max, Q_eigbounds_min, Q_eigbounds_mean),
+                 (tf-ts)),
             )
         else:
-            return loss, None, None, None, None
+            return loss, None, None, None, tf-ts
 
 
     optimizer = torch.optim.Adam(
@@ -635,6 +698,7 @@ def main(args=None):
         This function calculates one batch of adversarial inputs using a PGD attack.
         HOWEVER, the attack is done in terms of delta = {delta_x, delta_xerr, delta_uref} not interms of x_ref.
         """
+        total_Q_time = 0.0
         X = X.squeeze(-1)
         xerr = X[:,0:num_dim_x] - X[:, num_dim_x:(2*num_dim_x)] # xerr = x - xref
         #  keep track of most adversarial input found so far for each training example
@@ -660,19 +724,26 @@ def main(args=None):
         X_high = torch.tensor(np.concatenate([X_MAX, X_MAX, U_MAX]).reshape(1,-1)).type(X.dtype)
         # print("X_low: ", X_low)
         ############## Sanity check: loss before perturbations
-        batch_losses_uptbd, p1_uptbd, p2, l3, _ = forward( 
+        # batch_losses_uptbd, p1_uptbd, p2, l3, _ = forward( 
+        batch_losses_uptbd, _, _, _, stats = forward( 
             X[:, 0:num_dim_x].unsqueeze(-1),
             X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1),
             X[:, (2*num_dim_x):].unsqueeze(-1),
             _lambda=args._lambda,
             verbose=False if not train else False,
-            acc=True,
+            # acc=True,
+            acc=acc,
             detach=detach,
             clone=clone,
             zero_order=False,
             reduce=False # key to computing loss value for every example in the batch
         )
         batch_loss_uptbd = batch_losses_uptbd[0]
+        if acc:
+            _,_, _, times = stats
+        else:
+            times =stats
+        total_Q_time += times
         ##############
         for _ in range(restarts):
             # Initialize deltas to uniform random in 2*eps*range of each variable centered at center of range
@@ -703,7 +774,7 @@ def main(args=None):
                 # print("xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
                 
                 # compute the loss
-                losses, p1, p2, l3, _ = forward( #  this computes a scaler loss
+                losses, p1, p2, l3, stats = forward( #  this computes a scaler loss
                     x_ptb,
                     xref_ptb,
                     uref_ptb,
@@ -714,6 +785,11 @@ def main(args=None):
                     clone=clone,
                     zero_order=False,
                 )
+                if acc:
+                    _, _, _, times = stats
+                else:
+                    times = stats
+                total_Q_time += times
                 ##################################
                 loss = losses[0] # only use Q loss
                 ##################################
@@ -755,7 +831,7 @@ def main(args=None):
             xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
             uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
             # compute the loss
-            batch_losses, p1, p2, l3, _ = forward(
+            batch_losses, p1, p2, l3, stats = forward(
                 x_ptb,
                 xref_ptb,
                 uref_ptb,
@@ -771,6 +847,11 @@ def main(args=None):
             # store largest delta values
             max_delta[batch_loss >= max_loss] = delta.detach()[batch_loss >= max_loss]
             max_loss = torch.max(max_loss, batch_loss)
+            if acc:
+                _,_, _, times = stats
+            else:
+                times =stats
+            total_Q_time += times
 
             # ### Sanity check: check which data points for which the loss increased
             num_succ_att = (max_loss > batch_loss_uptbd).sum()
@@ -800,159 +881,33 @@ def main(args=None):
             
             # Are we finding CEs? Calculate eigenvalues
             # for debug
-            x_ptb =x_ptb.unsqueeze(-1)
-            xref_ptb = xref_ptb.unsqueeze(-1)
-            xerr_ptb = xerr_ptb.unsqueeze(-1)
-            _, p1, p2, l3, CEstats = forward(
-                x_ptb,
-                xref_ptb,
-                uref_ptb,
-                _lambda=args._lambda,
-                verbose=False,
-                acc=True,
-                detach=detach,
-                clone=clone,
-                zero_order=False,
-                reduce=False # key to computing loss value for every example in the batch
-            )
-            if verbose:
-                print(f"Number of points with eigval  < 0 (passing) before attack {p1_uptbd.sum()} vs after: {p1.sum()} out of {X.shape[0]}")
-            num_new_CE = np.logical_and(p1_uptbd == True, p1 == False).sum()
-            num_lost_CE = np.logical_and(p1_uptbd == False, p1 == True).sum()
-            Meig_stats, Qeig_stats = CEstats
-            if verbose:
-                print("max eigvalue after attack: ", Qeig_stats.max)
-            stats= Stats(num_new_CE, num_lost_CE)
-            
+            # x_ptb =x_ptb.unsqueeze(-1)
+            # xref_ptb = xref_ptb.unsqueeze(-1)
+            # xerr_ptb = xerr_ptb.unsqueeze(-1)
+            # _, p1, p2, l3, CEstats = forward(
+            #     x_ptb,
+            #     xref_ptb,
+            #     uref_ptb,
+            #     _lambda=args._lambda,
+            #     verbose=False,
+            #     acc=True,
+            #     detach=detach,
+            #     clone=clone,
+            #     zero_order=False,
+            #     reduce=False # key to computing loss value for every example in the batch
+            # )
+            # if verbose:
+            #     print(f"Number of points with eigval  < 0 (passing) before attack {p1_uptbd.sum()} vs after: {p1.sum()} out of {X.shape[0]}")
+            # num_new_CE = np.logical_and(p1_uptbd == True, p1 == False).sum()
+            # num_lost_CE = np.logical_and(p1_uptbd == False, p1 == True).sum()
+            # Meig_stats, Qeig_stats = CEstats
+            # if verbose:
+            #     print("max eigvalue after attack: ", Qeig_stats.max)
+            # stats= Stats(num_new_CE, num_lost_CE)
+            stats = Stats(0., 0.)
+
             # print("after attack: xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
-        return max_delta, stats
-
-    # def robust_trainval(
-    #     X,
-    #     epoch,
-    #     bs=args.bs,
-    #     train=True,
-    #     _lambda=args._lambda,
-    #     acc=False,
-    #     detach=False,
-    #     clone=False,
-    #     ptb_sched=None,
-    #     reg_coeff=0.0
-    # ):  
-    #     """
-    #     This function implements 1 epoch of training with PGD attack
-    #     """
-
-    #     if train:
-    #         indices = np.random.permutation(len(X))
-    #     else:
-    #         indices = np.array(list(range(len(X))))
-
-    #     total_loss = 0
-    #     total_p1 = 0
-    #     total_p2 = 0
-    #     total_l3 = 0
-    #     total_num_new_CEs = 0
-    #     total_num_lost_CEs = 0
-    #     eigmin = 0.0
-    #     eigmax = 0.0
-    #     eigmean = 0.0
-
-    #     num_train_batches = len(X) // bs
-    #     if train:
-    #         # print("len(X):", len(X), ", bs: ", bs)
-    #         _iter = tqdm(range(num_train_batches))
-    #     else:
-    #         _iter = range(num_train_batches)
-    #     for b in _iter:
-    #         # for each batch
-    #         start = time.time()
-    #         x = []
-    #         xref = []
-    #         uref = []
-    #         for id in indices[b * bs : (b + 1) * bs]:
-    #             if args.use_cuda:
-    #                 x.append(torch.from_numpy(X[id][0]).float().cuda())
-    #                 xref.append(torch.from_numpy(X[id][1]).float().cuda())
-    #                 uref.append(torch.from_numpy(X[id][2]).float().cuda())
-    #             elif use_mps:
-    #                 x.append(torch.from_numpy(X[id][0]).float().to("mps"))
-    #                 xref.append(torch.from_numpy(X[id][1]).float().to("mps"))
-    #                 uref.append(torch.from_numpy(X[id][2]).float().to("mps"))
-    #             else:
-    #                 x.append(torch.from_numpy(X[id][0]).float())
-    #                 xref.append(torch.from_numpy(X[id][1]).float())
-    #                 uref.append(torch.from_numpy(X[id][2]).float())
-
-    #         x, xref, uref = (torch.stack(d).detach() for d in (x, xref, uref))
-    #         x = x.requires_grad_()
-
-    #         start = time.time()
-    #         # print("x.shape: ", x.shape)
-    #         # print("X.shape, ", torch.concatenate([x, xref, uref], dim=1).shape)
-    #         robust_eps_i = ptb_sched(epoch + (b + 1)/num_train_batches)
-    #         if robust_eps_i > 0:
-    #             delta, stats = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
-    #                             robust_eps_i,
-    #                             args.robust_alpha, 
-    #                             args.robust_attack_iters,
-    #                             args.robust_restarts,
-    #                             args.robust_norm,
-    #                                 train,
-    #                                 acc,
-    #                                 detach,
-    #                                 clone)
-    #             total_num_new_CEs += stats.num_new_CEs 
-    #             total_num_lost_CEs += stats.num_lost_CEs
-    #         else:
-    #             delta = torch.zeros_like(torch.concatenate([x, xref, uref], dim=1).squeeze(-1))
-            
-    #         x_ptb = x + delta[:,0:num_dim_x].unsqueeze(-1)
-    #         xref_ptb = xref + delta[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
-    #         uref_ptb = uref + delta[:, (2*num_dim_x):].unsqueeze(-1)
-
-    #         losses, p1, p2, l3, _ = forward(
-    #             x_ptb,
-    #             xref_ptb,
-    #             uref_ptb,
-    #             _lambda=_lambda,
-    #             verbose=False if not train else False,
-    #             acc=acc,
-    #             detach=detach,
-    #             clone=clone,
-    #             zero_order=False,
-    #         )
-
-    #         if reg_coeff > 0.0:
-    #             losses.append(regularize(epoch, reg_coeff))
-
-    #         loss = sum(losses)
-
-    #         start = time.time()
-    #         if train and not clone:
-    #             optimizer.zero_grad()
-    #             loss.backward()
-    #             optimizer.step()
-    #             # print('backwad(): %.3f s'%(time.time() - start))
-    #         elif train and clone:
-    #             hardtanh_optimizer.zero_grad()
-    #             loss.backward()
-    #             hardtanh_optimizer.step()
-
-    #         total_loss += loss.item() * x.shape[0]
-    #         if acc:
-    #             total_p1 += p1.sum()
-    #             total_p2 += p2.sum()
-    #             total_l3 += l3 * x.shape[0]
-    #             eigmin  = np.minimum(stats.min, eigmin)
-    #             eigmax = np.maximum(stats.max, eigmax)
-    #             eigmean = (b*eigmean + stats.mean)/(b+1)
-    #     print("robust_eps_i at epoch end was: ", robust_eps_i)
-    #     # extra: max/min eig vals? inc/dec in # CEs
-    #     CEstats = Stats(total_num_new_CEs, total_num_lost_CEs)
-    #     eigstats = EigStats(eigmax, eigmin, eigmean)
-    #     return total_loss / len(X), total_p1 / len(X), total_p2 / len(X), total_l3 / len(X), (CEstats, eigstats)
-
+        return max_delta, stats, total_Q_time
 
     def trainval(
         X,
@@ -974,10 +929,10 @@ def main(args=None):
         # trainval a set of x
         # torch.autograd.set_detect_anomaly(True)
 
-        if train:
-            indices = np.random.permutation(len(X))
-        else:
-            indices = np.array(list(range(len(X))))
+        # if train:
+        #     indices = np.random.permutation(len(X))
+        # else:
+        #     indices = np.array(list(range(len(X))))
 
         total_num_new_CEs = 0
         total_num_lost_CEs = 0
@@ -991,41 +946,20 @@ def main(args=None):
         Meigmin = 1e6 
         Meigmax = 0.0 
         Meigcondmax = 0.0
+        total_Q_time = 0.0
+        Geigmin = 1e6
+        Geigmax = 0.0
+        Geigmean = 0.0
 
-        num_train_batches = len(X) // bs
-
-        if train:
-            # print("len(X):", len(X), ", bs: ", bs)
-            _iter = tqdm(range(num_train_batches))
-        else:
-            _iter = range(num_train_batches)
-        for b in _iter:
-            start = time.time()
-            x = []
-            xref = []
-            uref = []
-            for id in indices[b * bs : (b + 1) * bs]:
-                if args.use_cuda:
-                    x.append(torch.from_numpy(X[id][0]).float().cuda())
-                    xref.append(torch.from_numpy(X[id][1]).float().cuda())
-                    uref.append(torch.from_numpy(X[id][2]).float().cuda())
-                elif use_mps:
-                    x.append(torch.from_numpy(X[id][0]).float().to("mps"))
-                    xref.append(torch.from_numpy(X[id][1]).float().to("mps"))
-                    uref.append(torch.from_numpy(X[id][2]).float().to("mps"))
-                else:
-                    x.append(torch.from_numpy(X[id][0]).float())
-                    xref.append(torch.from_numpy(X[id][1]).float())
-                    uref.append(torch.from_numpy(X[id][2]).float())
-
-            x, xref, uref = (torch.stack(d).detach() for d in (x, xref, uref))
-            x = x.requires_grad_()
-
+        num_train_batches = len(X.dataset) // bs
+        
+        for b, data in enumerate(tqdm(X)):
+            x, xref, uref = data[0] # data[1] is an empty list
             start = time.time()
             if robust:
                 robust_eps_i = ptb_sched(epoch + (b + 1)/num_train_batches)
                 if robust_eps_i > 0:
-                    delta, stats = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
+                    delta, stats, Q_time = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
                                     robust_eps_i,
                                     args.robust_alpha, 
                                     args.robust_attack_iters,
@@ -1037,7 +971,8 @@ def main(args=None):
                                         clone,
                                         verbose=verbose)
                     total_num_new_CEs += stats.num_new_CEs 
-                    total_num_lost_CEs += stats.num_lost_CEs                   
+                    total_num_lost_CEs += stats.num_lost_CEs   
+                    total_Q_time += Q_time                
                 else:
                     delta = torch.zeros_like(torch.concatenate([x, xref, uref], dim=1).squeeze(-1))
                     
@@ -1080,19 +1015,26 @@ def main(args=None):
                 total_p1 += p1.sum()
                 total_p2 += p2.sum()
                 total_l3 += l3 * x.shape[0]
-                eigstats, Meigstats = stats
+                eigstats, Meigstats, times, Geigstats = stats
                 eigmin  = np.minimum(eigstats.min, eigmin)
                 eigmax = np.maximum(eigstats.max, eigmax)
                 eigmean = (b*eigmean + eigstats.mean)/(b+1)
                 Meigmin = np.minimum(Meigstats.min, Meigmin) 
                 Meigmax = np.maximum(Meigstats.max, Meigmax)
                 Meigcondmax = np.maximum(Meigstats.cond_max, Meigcondmax)
+                Geigmin  = np.minimum(Geigstats.min, Geigmin)
+                Geigmax = np.maximum(Geigstats.max, Geigmax)
+                Geigmean = (b*Geigmean + Geigstats.mean)/(b+1)
+            else:
+                times = stats
+            total_Q_time += times
         if robust:
             print("robust_eps_i at epoch end was: ", robust_eps_i)
         eigstats = EigStats(eigmax, eigmin, eigmean)
+        Geigstats = EigStats(Geigmax, Geigmin, Geigmean)
         meigstats = MeigStats(Meigmax, Meigmin, Meigcondmax)
         CE_stats = Stats(total_num_new_CEs, total_num_lost_CEs) 
-        return total_loss / len(X), total_p1 / len(X), total_p2 / len(X), total_l3 / len(X), (eigstats, meigstats, CE_stats, losses)
+        return total_loss / len(X.dataset), total_p1 / len(X.dataset), total_p2 / len(X.dataset), total_l3 / len(X.dataset), (eigstats, meigstats, Geigstats, CE_stats, losses, total_Q_time / len(X.dataset))
 
 
     best_acc = 0
@@ -1240,7 +1182,13 @@ def main(args=None):
 
     layout0 = {
         "Eigenvalues":{
-            "Eigenvalues": ["Multiline", ["eig/max", "eig/min", "eig/mea"]],
+            "Eigenvalues": ["Multiline", ["eig/max", "eig/min", "eig/mean"]],
+        },
+    }
+
+    layout1 = {
+        "GershApproxEigenvalues":{
+            "GershApproxEigenvalues": ["Multiline", ["Geig/max", "Geig/min", "Geig/mean"]],
         },
     }
     # layout1 = {
@@ -1260,12 +1208,13 @@ def main(args=None):
     }
 
     writer.add_custom_scalars(layout0)
-    # writer.add_custom_scalars(layout1)
+    writer.add_custom_scalars(layout1)
     writer.add_custom_scalars(layout2)
     writer.add_custom_scalars(layout3)
 
     # perturbation schedule for robust training
-    ptb_schedule = lambda t: np.interp([t], [0, 1.5, args.epochs // 3, args.epochs * 2 // 3, args.epochs], [0.0, 0.0, args.robust_eps/2., args.robust_eps/2., args.robust_eps])[0]
+    ptb_schedule = lambda t: args.robust_eps
+    # np.interp([t], [0, 1.5, args.epochs // 3, args.epochs * 2 // 3, args.epochs], [0.0, 0.0, args.robust_eps/2., args.robust_eps/2., args.robust_eps])[0]
     # Start training a tanh network
     print("Using robust training: ", args.robust_train)
     for epoch in range(args.epochs):
@@ -1285,7 +1234,7 @@ def main(args=None):
         #     writer.add_scalar("number lost CE from training", CE_train.num_lost_CEs, epoch)
         # else:
             # print("Using vanilla training.")
-        loss, _, _, _, train_stats = trainval(X_tr,
+        loss, _, _, _, train_stats = trainval(X_tr_DL,
                                     train=True,
                                     _lambda=args._lambda,
                                     acc=False,
@@ -1294,25 +1243,28 @@ def main(args=None):
                                     ptb_sched = ptb_schedule,
                                     robust=args.robust_train
                                 )
-        _, _, CE_stats, _ = train_stats
+        _, _, _, CE_stats, _, Q_time_tr = train_stats
         if args.robust_train:
             writer.add_scalar("number new CE from training", CE_stats.num_new_CEs, epoch)
             writer.add_scalar("number lost CE from training", CE_stats.num_lost_CEs, epoch)
         print("Training loss: ", loss)
+        writer.add_scalar("Avg Q loss computation time (train): ", Q_time_tr, epoch)
         # writer.add_scalar("traineig/max", train_eig_stats.max, epoch)
         # writer.add_scalar("traineig/min", train_eig_stats.min, epoch)
         # writer.add_scalar("traineig/mean", train_eig_stats.mean, epoch) 
-        # now test
-        loss, p1, p2, l3, test_stats = trainval(X_te, 
+
+        ### now test ###
+        loss, p1, p2, l3, test_stats = trainval(X_te_DL, 
                                                 train=False, 
-                                                _lambda=args._lambda, 
+                                                _lambda=args.test_lambda, 
                                                 acc=True, 
                                                 detach=False, 
                                                 epoch=epoch,
                                                 ptb_sched = ptb_schedule, 
                                                 robust=args.robust_train)
         print("Epoch %d: Testing loss/p1/p2/l3: " % epoch, loss, p1, p2, l3)
-        eig_stats, meig_stats, CE_stats, losses = test_stats
+        eig_stats, meig_stats, geig_stats, CE_stats, losses, Q_time = test_stats
+        writer.add_scalar("Avg Q loss computation time (test): ", Q_time, epoch)
         if len(losses) == 4:
             loss_Q, loss_C1, loss_W, loss_C2 = losses
         elif len(losses) == 5:
@@ -1324,7 +1276,10 @@ def main(args=None):
         writer.add_scalar("% of pts with max eig C1_LHS < 0", p2, epoch)
         writer.add_scalar("eig/max", eig_stats.max, epoch)
         writer.add_scalar("eig/min", eig_stats.min, epoch)
-        writer.add_scalar("eig/mean", eig_stats.mean, epoch) 
+        writer.add_scalar("eig/mean", eig_stats.mean, epoch)
+        writer.add_scalar("Geig/max", geig_stats.max, epoch)
+        writer.add_scalar("Geig/min", geig_stats.min, epoch)
+        writer.add_scalar("Geig/mean", geig_stats.mean, epoch) 
         writer.add_scalar("Meig/max", meig_stats.max, epoch)
         writer.add_scalar("Meig/min", meig_stats.min, epoch)
         writer.add_scalar("Meig/condmax", meig_stats.cond_max, epoch)

@@ -140,11 +140,11 @@ class W_FUNC(nn.Module):
                 self.model_Wbot[i].set_mixing(mixing)
 
 
-def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0):
-    M_width = 128
-    M_depth = 2
-    u_width = 128
-    u_depth = 2
+def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0, M_width=128, M_depth=2, u_width=128, u_depth=2):
+    M_width = M_width
+    M_depth = M_depth
+    u_width = u_width
+    u_depth = u_depth
     if mixing > 0.0:
         M_width = 64
         M_depth = 4
@@ -200,17 +200,27 @@ def get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=0.0
     return model_W, model_Wbot, model_u_w1, W_func, u_func
 
 
-def get_model(num_dim_x, num_dim_control, w_lb, use_cuda=False):
-    model_W, model_Wbot, model_u_w1, W_func, u_func = get_model_mixed(
-        num_dim_x, num_dim_control, w_lb, use_cuda=use_cuda, mixing=0.0
-    )
-    (
-        model_W_hard,
-        model_Wbot_hard,
-        model_u_w1_hard,
-        W_func_hard,
-        u_func_hard,
-    ) = get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=use_cuda, mixing=1.0)
+def get_model(num_dim_x, 
+              num_dim_control, 
+              w_lb, 
+              use_cuda=False,  
+              M_width=128, M_depth=2, 
+              u_width=128, u_depth=2):
+    model_W, model_Wbot, model_u_w1, W_func, u_func = get_model_mixed(num_dim_x, 
+                                                                      num_dim_control, 
+                                                                      w_lb, 
+                                                                      use_cuda=use_cuda, 
+                                                                      mixing=0.0,  
+                                                                      M_width=M_width, M_depth=M_depth, u_width=u_width, u_depth=u_depth)
+    (model_W_hard,
+     model_Wbot_hard,
+     model_u_w1_hard,
+     W_func_hard,
+     u_func_hard) = get_model_mixed(num_dim_x,
+                                    num_dim_control, 
+                                    w_lb, 
+                                    use_cuda=use_cuda, 
+                                    mixing=1.0)
 
     return (
         model_W,
