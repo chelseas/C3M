@@ -29,6 +29,8 @@ log = os.path.join(os.path.dirname(__file__), "logs/1129.test_l1reg_3") # New mo
 
 
 def build_model(log, comparison=False):
+    log = os.path.join(os.path.dirname(__file__), log)
+
     use_cuda = False
     task = "CARcrown"
 
@@ -252,7 +254,7 @@ def build_model(log, comparison=False):
             # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
             return gersh_ub_eig_Q
 
-    """Function utilized by the complete verifier to build the model."""
+    # Function utilized by the complete verifier to build the model.
     certvermodel = CertVerModel(xall, replace="tanh")
 
     if comparison:
