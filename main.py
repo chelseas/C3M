@@ -62,7 +62,7 @@ def cmdlineparse(args):
         "--lambda", type=float, dest="_lambda", default=1.0, help="training convergence rate: lambda"
     )
     parser.add_argument(
-        "--lambda_test", type=float, dest="test_lambda", default=1.0, help="test convergence rate: lambda"
+        "--lambda_test", type=float, dest="test_lambda", default=0.1, help="test convergence rate: lambda"
     )
     parser.add_argument(
         "--w_ub",
@@ -106,11 +106,18 @@ def cmdlineparse(args):
         help="Norm for adversarial training.",
     )
     parser.add_argument(
-        "--robust_attack_iters",
-        dest="robust_attack_iters",
+        "--robust_attack_iters_train",
+        dest="robust_attack_iters_train",
         type=int,
         default=2,
         help="Number of iterations to create adversarial example during robust training.",
+    )
+    parser.add_argument(
+        "--robust_attack_iters_test",
+        dest="robust_attack_iters_test",
+        type=int,
+        default=5,
+        help="Number of iterations to create adversarial example during robust testing.",
     )
     parser.add_argument(
         '--robust_restarts', dest="robust_restarts", default=1, type=int, help=" number of times that the adversarial attack can restart during adversarial training. A hyper parameter.")
@@ -957,12 +964,16 @@ def main(args=None):
             x, xref, uref = data[0] # data[1] is an empty list
             start = time.time()
             if robust:
+                if train:
+                    attack_iters = args.robust_attack_iters_train
+                else:
+                    attack_iters = args.robust_attack_iters_test
                 robust_eps_i = ptb_sched(epoch + (b + 1)/num_train_batches)
                 if robust_eps_i > 0:
                     delta, stats, Q_time = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
                                     robust_eps_i,
                                     args.robust_alpha, 
-                                    args.robust_attack_iters,
+                                    attack_iters,
                                     args.robust_restarts,
                                     args.robust_norm,
                                         train,
