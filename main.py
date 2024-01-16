@@ -673,8 +673,9 @@ def main(args=None):
         # print("delta_range: ", delta_range)
         delta_min = -robust_eps*delta_range # delta should be zero centered
         delta_max = robust_eps*delta_range 
-        def sample_delta():
-            delta = torch.zeros(Xshape).type(Xdtype)
+        def sample_delta(restarts):
+            delta_shape = (Xshape[0]*restarts, *Xshape[1:])
+            delta = torch.zeros(delta_shape).type(Xdtype)
             delta.uniform_(-robust_eps, robust_eps)
             delta = (delta*(delta_range)).type(Xdtype)
             assert((delta <= delta_max).all() and (delta >= delta_min).all()) # sanity check
@@ -708,24 +709,18 @@ def main(args=None):
         total_Q_time = 0.0
         X = X.squeeze(-1)
         xerr = X[:,0:num_dim_x] - X[:, num_dim_x:(2*num_dim_x)] # xerr = x - xref
-        #  keep track of most adversarial input found so far for each training example
-        max_loss = torch.zeros(X.shape[0])
-        max_delta = torch.zeros_like(X)
-        if args.use_cuda:
-            max_loss.cuda()
-            max_delta.cuda()
         sample_delta, delta_min, delta_max = setup_delta(X.shape, X.dtype, robust_eps)
         # print("delta_min: ", delta_min, ", delta_max: ", delta_max)
         # the largest possible xerr delta is a function of the data points in X (xerr)
         # XE_MIN <= xerr + delta_xerr <= XE_MAX
         # print("X_MIN: ", X_MIN, ", X_MAX: ", X_MAX)
         x_min, x_max, xe_min, xe_max, u_min, u_max = reformat_limits(X.dtype, X_MIN, X_MAX, XE_MIN, XE_MAX, U_MIN, U_MAX)
-        delta_min_xerr = torch.maximum(torch.tensor(XE_MIN.reshape(1,-1)) - xerr, delta_min[:,num_dim_x:(2*num_dim_x)].reshape(1,-1)).detach() # contains batch dim
-        # print("most conservative min bounds: ", delta_min_xerr.max(dim=0))
-        # print("least conservative min bounds: ", delta_min_xerr.min(dim=0))
-        delta_max_xerr = torch.minimum(torch.tensor(XE_MAX.reshape(1,-1)) - xerr, delta_max[:,num_dim_x:(2*num_dim_x)].reshape(1,-1)).detach()
-        # print("most conservative max bounds: ", delta_max_xerr.min(dim=0))
-        # print("least conservative max bounds: ", delta_max_xerr.max(dim=0))
+        delta_min_xerr = torch.maximum(torch.tensor(XE_MIN.reshape(1,-1)) - xerr, delta_min[:,num_dim_x:(2*num_dim_x)].reshape(1,-1)).detach().unsqueeze(0) # contains batch dim
+        # print("most conservative min bounds: ", delta_min_xerr.max(dim=1))
+        # print("least conservative min bounds: ", delta_min_xerr.min(dim=1))
+        delta_max_xerr = torch.minimum(torch.tensor(XE_MAX.reshape(1,-1)) - xerr, delta_max[:,num_dim_x:(2*num_dim_x)].reshape(1,-1)).detach().unsqueeze(0)
+        # print("most conservative max bounds: ", delta_max_xerr.min(dim=1))
+        # print("least conservative max bounds: ", delta_max_xerr.max(dim=1))
         # X is x, xref, uref
         X_low = torch.tensor(np.concatenate([X_MIN, X_MIN, U_MIN]).reshape(1,-1)).type(X.dtype)
         X_high = torch.tensor(np.concatenate([X_MAX, X_MAX, U_MAX]).reshape(1,-1)).type(X.dtype)
@@ -746,99 +741,49 @@ def main(args=None):
             reduce=False # key to computing loss value for every example in the batch
         )
         batch_loss_uptbd = batch_losses_uptbd[0]
+        #  keep track of most adversarial input found so far for each training example
+        max_loss = batch_loss_uptbd
+        max_delta = torch.zeros_like(X)
+        if args.use_cuda:
+            max_loss.cuda()
+            max_delta.cuda()
         if acc:
             _,_, _, times = stats
         else:
             times =stats
         total_Q_time += times
         ##############
-        for _ in range(restarts):
-            # Initialize deltas to uniform random in 2*eps*range of each variable centered at center of range
-            delta = sample_delta()
-            # print("delta.shape: ", delta.shape)
-            delta.requires_grad = True
-            delta.retain_grad()
-            # optimize the deltas
-            for _ in range(attack_iters):
-                # compute the perturbed inputs
-                delta_x = delta[:,:num_dim_x]
-                delta_xerr = delta[:, num_dim_x:2*num_dim_x]
-                delta_uref = delta[:, 2*num_dim_x:]
-                # clamp to x_err range because it won't be clamped in ptbd_X
-                delta_xerr = torch.clamp(delta_xerr, min=delta_min_xerr, max=delta_max_xerr) # this uses batch dim bounds
-                # clamp to x, xref and uref ranges
-                delta_forX = torch.concatenate([delta_x,
-                                                delta_x - delta_xerr,
-                                                delta_uref], dim=1)
-                ptbd_X = torch.clamp(X + delta_forX, min=X_low, max=X_high).type(X.dtype)
-                # print("ptbd_X.dtype: ", ptbd_X.dtype)
-                x_ptb = ptbd_X[:,0:num_dim_x].unsqueeze(-1)
-                xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
-                uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
-                
-                # ### Sanity check: What is range of xerr?
-                # x_err_ptb = x_ptb - xref_ptb
-                # print("xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
-                
-                # compute the loss
-                losses, p1, p2, l3, stats = forward( #  this computes a scaler loss
-                    x_ptb,
-                    xref_ptb,
-                    uref_ptb,
-                    _lambda=args._lambda,
-                    verbose=False if not train else False,
-                    acc=acc,
-                    detach=detach,
-                    clone=clone,
-                    zero_order=False,
-                )
-                if acc:
-                    _, _, _, times = stats
-                else:
-                    times = stats
-                total_Q_time += times
-                ##################################
-                loss = losses[0] # only use Q loss
-                ##################################
-                # compute gradients
-                loss.backward()
-                grad = delta.grad.detach()
-                d = delta
-                g = grad
-                # print("delta.grad:",delta.grad)
-                if norm == "l_inf":
-                    # Do gradient ascent on the disturbance delta (d)
-                    d = d + alpha * torch.sign(g)
-                    # clamp to limited disturbance range
-                    d = torch.clamp(d, min=delta_min, max=delta_max)
-                elif norm == "l_2":
-                    raise NotImplementedError
-                    # g_norm = torch.norm(g.view(g.shape[0],-1),dim=1).view(-1,1,1,1)
-                    # scaled_g = g/(g_norm + 1e-10)
-                    # d = (d + scaled_g*alpha).view(d.size(0),-1).renorm(p=2,dim=0,maxnorm=epsilon).view_as(d)
-                # d = torch.clamp(d, delta_low, delta_high) # probably unecessary?
-                delta.data = d 
-                # reset gradient before next iter
-                delta.grad.zero_()
-                # print("loss during attack: ", loss)
-            #  here we compute a loss value for each example in the batch
+        # Initialize deltas to uniform random in 2*eps*range of each variable centered at zero
+        delta = sample_delta(restarts).reshape(restarts, *X.shape)  # shape (restarts, bs, state_dim)
+        # print("delta is leaf? ", delta.is_leaf)
+        # print("delta.shape: ", delta.shape)
+        delta.requires_grad = True
+        delta.retain_grad()
+        # optimize the deltas
+        for _ in range(attack_iters):
+            # delta = delta.reshape(restarts, *X.shape)
             # compute the perturbed inputs
-            delta_x = delta[:,:num_dim_x]
-            delta_xerr = delta[:, num_dim_x:2*num_dim_x]
-            delta_uref = delta[:, 2*num_dim_x:]
+            delta_x = delta[:,:,:num_dim_x]
+            delta_xerr = delta[:,:, num_dim_x:2*num_dim_x] # shape (restarts, bs, x_state_dim)
+            delta_uref = delta[:,:, 2*num_dim_x:]
             # clamp to x_err range because it won't be clamped in ptbd_X
-            delta_xerr = torch.clamp(delta_xerr, min=delta_min_xerr, max=delta_max_xerr)
-            # clamp to x, xref and uref ranges. xerr = x - xref ==> xref = x - xerr
+            delta_xerr = torch.clamp(delta_xerr, min=delta_min_xerr, max=delta_max_xerr) # this uses batch dim bounds
+            # clamp to x, xref and uref ranges
             delta_forX = torch.concatenate([delta_x,
                                             delta_x - delta_xerr,
-                                            delta_uref], dim=1)
-            ptbd_X = torch.clamp(X + delta_forX, min=X_low, max=X_high).type(X.dtype)
-            # print("ptbd_X.dtype: ", ptbd_X.dtype)
+                                            delta_uref], dim=-1) # should be (restarts, *X.shape)
+            # in this call, we now put it into the shape (bs*restarts, state_dim)
+            ptbd_X = torch.clamp((X.unsqueeze(0) + delta_forX).reshape((X.shape[0]*restarts, *X.shape[1:])), min=X_low, max=X_high).type(X.dtype)
             x_ptb = ptbd_X[:,0:num_dim_x].unsqueeze(-1)
             xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
             uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
+            
+            # ### Sanity check: What is range of xerr?
+            # x_err_ptb = x_ptb - xref_ptb
+            # print("xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
+            
             # compute the loss
-            batch_losses, p1, p2, l3, stats = forward(
+            losses, p1, p2, l3, stats = forward( #  this computes a scaler loss
                 x_ptb,
                 xref_ptb,
                 uref_ptb,
@@ -848,70 +793,136 @@ def main(args=None):
                 detach=detach,
                 clone=clone,
                 zero_order=False,
-                reduce=False # key to computing loss value for every example in the batch
             )
-            batch_loss = batch_losses[0] # only use Q loss
-            # store largest delta values
-            max_delta[batch_loss >= max_loss] = delta.detach()[batch_loss >= max_loss]
-            max_loss = torch.max(max_loss, batch_loss)
             if acc:
-                _,_, _, times = stats
+                _, _, _, times = stats
             else:
-                times =stats
+                times = stats
             total_Q_time += times
+            ##################################
+            loss = losses[0] # only use Q loss
+            ##################################
+            # compute gradients
+            loss.backward()
+            grad = delta.grad.detach()
+            # print("grad: ", type(grad), ", grad.shape: ", grad.shape)
+            d = delta
+            g = grad
+            # print("delta.grad:",delta.grad)
+            if norm == "l_inf":
+                # Do gradient ascent on the disturbance delta (d)
+                d = d + alpha * torch.sign(g)
+                # clamp to limited disturbance range
+                d = torch.clamp(d, min=delta_min.unsqueeze(0), max=delta_max.unsqueeze(0))
+            elif norm == "l_2":
+                raise NotImplementedError
+                # g_norm = torch.norm(g.view(g.shape[0],-1),dim=1).view(-1,1,1,1)
+                # scaled_g = g/(g_norm + 1e-10)
+                # d = (d + scaled_g*alpha).view(d.size(0),-1).renorm(p=2,dim=0,maxnorm=epsilon).view_as(d)
+            # d = torch.clamp(d, delta_low, delta_high) # probably unecessary?
+            delta.data = d 
+            # reset gradient before next iter
+            delta.grad.zero_()
+            # print("loss during attack: ", loss)
+        #  here we compute a loss value for each example in the batch
+        # compute the perturbed inputs
+        # delta = delta.reshape(restarts, *X.shape)
+        delta_x = delta[:,:,:num_dim_x]
+        delta_xerr = delta[:,:,num_dim_x:2*num_dim_x]
+        delta_uref = delta[:,:, 2*num_dim_x:]
+        # clamp to x_err range because it won't be clamped in ptbd_X
+        delta_xerr = torch.clamp(delta_xerr, min=delta_min_xerr, max=delta_max_xerr)
+        # clamp to x, xref and uref ranges. xerr = x - xref ==> xref = x - xerr
+        delta_forX = torch.concatenate([delta_x,
+                                        delta_x - delta_xerr,
+                                        delta_uref], dim=-1)
+        ptbd_X = torch.clamp((X.unsqueeze(0) + delta_forX).reshape((X.shape[0]*restarts, *X.shape[1:])), min=X_low, max=X_high).type(X.dtype)
+        # print("ptbd_X.dtype: ", ptbd_X.dtype)
+        x_ptb = ptbd_X[:,0:num_dim_x].unsqueeze(-1)
+        xref_ptb = ptbd_X[:, num_dim_x:(2*num_dim_x)].unsqueeze(-1)
+        uref_ptb = ptbd_X[:, (2*num_dim_x):].unsqueeze(-1)
+        # compute the loss
+        batch_losses, p1, p2, l3, stats = forward(
+            x_ptb,
+            xref_ptb,
+            uref_ptb,
+            _lambda=args._lambda,
+            verbose=False if not train else False,
+            acc=acc,
+            detach=detach,
+            clone=clone,
+            zero_order=False,
+            reduce=False # key to computing loss value for every example in the batch
+        )
+        batch_loss = batch_losses[0] # only use Q loss
 
-            # ### Sanity check: check which data points for which the loss increased
-            num_succ_att = (max_loss > batch_loss_uptbd).sum()
-            # print("Number of successfully increased loss points: ", num_succ_att, " out of batch: ", X.shape[0])
-            # ###
+        # take max over restarts (done in parallel)
+        bl = batch_loss.reshape((restarts, X.shape[0]))
+        dl = delta.reshape((restarts, *X.shape))
+        mor_bl, mor_ind = bl.max(dim=0)
+        mor_delta = dl[mor_ind, torch.arange(dl.shape[1]), :].reshape(X.shape)
 
-            # ### Sanity check: What is range of all vars?
-            xerr_ptb = x_ptb - xref_ptb
-            x_ptb =x_ptb.squeeze(-1)
-            xref_ptb = xref_ptb.squeeze(-1)
-            xerr_ptb = xerr_ptb.squeeze(-1)
-            def print_failing_exs(limL, limU, val, name):
-                Ltruth = torch.logical_or(limL <= val, torch.isclose(limL, val)).all()
-                if not Ltruth:
-                    print(f"L {name}: ", limL)
-                    print(f"failing exs {name} L: ", val[(limL <= val).sum(dim=1) < val.shape[1], :])
-                assert(Ltruth) # throw error
-                Utruth = torch.logical_or(limU >= val, torch.isclose(limU, val)).all()
-                if not Utruth:
-                    print(f"U {name}: ", limU)
-                    print(f"failing exs {name} U: ", val[(val <= limU).sum(dim=1) < val.shape[1], :])
-                assert(Utruth) # throw error
-            print_failing_exs(x_min, x_max, x_ptb, "x_ptb")
-            print_failing_exs(x_min, x_max, xref_ptb, "xref_ptb")
-            print_failing_exs(xe_min, xe_max, xerr_ptb, "xerr_ptb")
-            print_failing_exs(u_min, u_max, uref_ptb, "uref_ptb")
-            
-            # Are we finding CEs? Calculate eigenvalues
-            # for debug
-            # x_ptb =x_ptb.unsqueeze(-1)
-            # xref_ptb = xref_ptb.unsqueeze(-1)
-            # xerr_ptb = xerr_ptb.unsqueeze(-1)
-            # _, p1, p2, l3, CEstats = forward(
-            #     x_ptb,
-            #     xref_ptb,
-            #     uref_ptb,
-            #     _lambda=args._lambda,
-            #     verbose=False,
-            #     acc=True,
-            #     detach=detach,
-            #     clone=clone,
-            #     zero_order=False,
-            #     reduce=False # key to computing loss value for every example in the batch
-            # )
-            # if verbose:
-            #     print(f"Number of points with eigval  < 0 (passing) before attack {p1_uptbd.sum()} vs after: {p1.sum()} out of {X.shape[0]}")
-            # num_new_CE = np.logical_and(p1_uptbd == True, p1 == False).sum()
-            # num_lost_CE = np.logical_and(p1_uptbd == False, p1 == True).sum()
-            # Meig_stats, Qeig_stats = CEstats
-            # if verbose:
-            #     print("max eigvalue after attack: ", Qeig_stats.max)
-            # stats= Stats(num_new_CE, num_lost_CE)
-            stats = Stats(0., 0.)
+        # store largest delta values
+        max_delta[mor_bl >= max_loss] = mor_delta.detach()[mor_bl >= max_loss]
+        max_loss = torch.max(max_loss, mor_bl)
+        if acc:
+            _,_, _, times = stats
+        else:
+            times =stats
+        total_Q_time += times
+
+        # ### Sanity check: check which data points for which the loss increased
+        num_succ_att = (max_loss > batch_loss_uptbd).sum()
+        # print("Number of successfully increased loss points: ", num_succ_att, " out of batch: ", X.shape[0])
+        # ###
+
+        # ### Sanity check: What is range of all vars?
+        xerr_ptb = x_ptb - xref_ptb
+        x_ptb =x_ptb.squeeze(-1)
+        xref_ptb = xref_ptb.squeeze(-1)
+        xerr_ptb = xerr_ptb.squeeze(-1)
+        def print_failing_exs(limL, limU, val, name):
+            Ltruth = torch.logical_or(limL <= val, torch.isclose(limL, val)).all()
+            if not Ltruth:
+                print(f"L {name}: ", limL)
+                print(f"failing exs {name} L: ", val[(limL <= val).sum(dim=1) < val.shape[1], :])
+            assert(Ltruth) # throw error
+            Utruth = torch.logical_or(limU >= val, torch.isclose(limU, val)).all()
+            if not Utruth:
+                print(f"U {name}: ", limU)
+                print(f"failing exs {name} U: ", val[(val <= limU).sum(dim=1) < val.shape[1], :])
+            assert(Utruth) # throw error
+        print_failing_exs(x_min, x_max, x_ptb, "x_ptb")
+        print_failing_exs(x_min, x_max, xref_ptb, "xref_ptb")
+        print_failing_exs(xe_min, xe_max, xerr_ptb, "xerr_ptb")
+        print_failing_exs(u_min, u_max, uref_ptb, "uref_ptb")
+        
+        # Are we finding CEs? Calculate eigenvalues
+        # for debug
+        # x_ptb =x_ptb.unsqueeze(-1)
+        # xref_ptb = xref_ptb.unsqueeze(-1)
+        # xerr_ptb = xerr_ptb.unsqueeze(-1)
+        # _, p1, p2, l3, CEstats = forward(
+        #     x_ptb,
+        #     xref_ptb,
+        #     uref_ptb,
+        #     _lambda=args._lambda,
+        #     verbose=False,
+        #     acc=True,
+        #     detach=detach,
+        #     clone=clone,
+        #     zero_order=False,
+        #     reduce=False # key to computing loss value for every example in the batch
+        # )
+        # if verbose:
+        #     print(f"Number of points with eigval  < 0 (passing) before attack {p1_uptbd.sum()} vs after: {p1.sum()} out of {X.shape[0]}")
+        # num_new_CE = np.logical_and(p1_uptbd == True, p1 == False).sum()
+        # num_lost_CE = np.logical_and(p1_uptbd == False, p1 == True).sum()
+        # Meig_stats, Qeig_stats = CEstats
+        # if verbose:
+        #     print("max eigvalue after attack: ", Qeig_stats.max)
+        # stats= Stats(num_new_CE, num_lost_CE)
+        stats = Stats(0., 0.)
 
             # print("after attack: xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
         return max_delta, stats, total_Q_time
