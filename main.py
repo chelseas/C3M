@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 from collections import namedtuple
 use_mps = False
+import pdb
 # if torch.backends.mps.is_available() and torch.backends.mps.is_built():
 #     torch.set_default_device('mps')
 #     use_mps = True
@@ -19,9 +20,6 @@ import matplotlib.pyplot as plt
 import os
 import sys
 
-sys.path.append("systems")
-sys.path.append("configs")
-sys.path.append("models")
 import argparse
 # import pdb
 
@@ -29,6 +27,7 @@ Stats = namedtuple("Stats", "num_new_CEs num_lost_CEs")
 
 EigStats = namedtuple("EigStats", "max min mean")
 MeigStats = namedtuple("MeigStats", "max min cond_max")
+CounterExamples = namedtuple("CounterExamples", "x xref uref val")
 
 np.random.seed(1024)
 
@@ -156,20 +155,32 @@ def cmdlineparse(args):
         default=2,
         help="Depth of the control network.",
     )
+    parser.add_argument(
+        "--gersh_spread",
+        dest="useopt",
+        action="store_false",
+        help="An attempt at a gershgorin loss that has better gradient sharing. ",
+    )
     args = parser.parse_args(args)
     return args
 
 def main(args=None):
     # pdb.set_trace()
     args = cmdlineparse(args)
+    print("cmd line args: ", args)
     if not os.path.isdir(args.log):
         os.mkdir(args.log)
     if not args.load_model:
         os.system("cp *.py " + args.log)
-        os.system("cp -r models/ " + args.log)
-        os.system("cp -r configs/ " + args.log)
-        os.system("cp -r systems/ " + args.log)
+        os.system("cp -r models/ " + args.log + "/models")
+        os.system("cp -r configs/ " + args.log + "/configs")
+        os.system("cp -r systems/ " + args.log + "/systems")
         writer = SummaryWriter(args.log + "/tb")
+
+    sys.path.append(args.log)
+    sys.path.append(args.log + "/systems")
+    sys.path.append(args.log + "/configs")
+    sys.path.append(args.log + "/models")
     global_steps = 0
     if args.use_cuda:
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
@@ -219,19 +230,35 @@ def main(args=None):
     get_model = model.get_model
     INVERSE_METRIC = model.INVERSE_METRIC
 
-    (
-        model_W,
-        model_Wbot,
-        model_u_w1,
-        W_func,
-        u_func,
-        model_W_hard,
-        model_Wbot_hard,
-        model_u_w1_hard,
-        W_func_hard,
-        u_func_hard,
-    ) = get_model(num_dim_x, num_dim_control, w_lb=args.w_lb, use_cuda=args.use_cuda,
-                  M_width=args.M_width, M_depth=args.M_depth, u_width=args.u_width, u_depth=args.u_depth)
+    if args.load_model:
+        filename_model = args.log + "/model_best.pth.tar"
+        filename_metric = args.log + "/metric_best.pth.tar"
+        filename_controller = args.log + "/controller_best.pth.tar"
+        map_location = "cuda" if args.use_cuda else "cpu"
+        trained_model = torch.load(filename_model, map_location=map_location)
+        model_W = trained_model['model_W']
+        model_Wbot = trained_model['model_Wbot']
+        model_u_w1 = trained_model['model_u_w1']
+        W_func = torch.load(filename_metric, map_location=map_location)
+        u_func = torch.load(filename_controller, map_location=map_location)
+        # model_W_hard = trained_model['model_W_hard']
+        # model_Wbot_hard = trained_model['model_Wbot_hard']
+        # model_u_w1_hard = trained_model['model_u_w1_hard']
+        loaded_args = trained_model['args']
+    else:
+        (
+            model_W,
+            model_Wbot,
+            model_u_w1,
+            W_func,
+            u_func,
+            model_W_hard,
+            model_Wbot_hard,
+            model_u_w1_hard,
+            W_func_hard,
+            u_func_hard,
+        ) = get_model(num_dim_x, num_dim_control, w_lb=args.w_lb, use_cuda=args.use_cuda,
+                    M_width=args.M_width, M_depth=args.M_depth, u_width=args.u_width, u_depth=args.u_depth)
 
     if use_mps:
         print("casting to mps again")
@@ -404,16 +431,20 @@ def main(args=None):
             # print("loss dim: ", neg_mean.shape)
             return -1.0 * neg_mean
 
-    def gersh_criterion(A):
+    def gersh_criterion(A, useopt=True):
         A = A.squeeze(-1) # remove trailing 1 dim
         diagonal_entries = torch.diagonal(A, dim1=-2, dim2=-1)
         off_diagonal_sum = torch.abs(A).sum(dim=-1) - torch.abs(diagonal_entries)
         gersh_LBs = diagonal_entries - off_diagonal_sum # want this to be >0
-        gersh_LB = gersh_LBs.amin(dim=-1)
+        if useopt:
+            gersh_LB = gersh_LBs.amin(dim=-1)
+        else:
+            gersh_LB = gersh_LBs
         return gersh_LB
+        
     
-    def gershgorin_loss(A, reduce=True):
-        gersh_LB = gersh_criterion(A)
+    def gershgorin_loss(A, reduce=True, useopt=True):
+        gersh_LB = gersh_criterion(A, useopt=useopt)
         # print("gersh_LB.shape: ", gersh_LB.shape)
         negative_index = gersh_LB < 0
         if reduce:
@@ -423,7 +454,11 @@ def main(args=None):
                 return 0.0
         else:
             gersh_LB[torch.logical_not(negative_index)] = 0.0
-            return -1 * gersh_LB
+            if useopt:
+                return -1 * gersh_LB
+            else:
+                return -1 * gersh_LB.sum(dim=-1)
+            
 
     def loss_pos_matrix_eigen_values(A):
         # A: bs x d x d
@@ -443,7 +478,9 @@ def main(args=None):
         clone=False,
         zero_order=False,
         reduce=True,
-        debug=False
+        debug=False,
+        CEs=False,
+        useopt=True
     ):
         # x: bs x n x 1
         bs = x.shape[0]
@@ -555,20 +592,20 @@ def main(args=None):
             C2s.append(C2)
 
         ts = time.time()
-        # loss_Q1 = loss_pos_matrix_random_sampling(
-        #     -Contraction
-        #     - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
-        #     reduce=reduce
-        # )
+        loss_Q1 = loss_pos_matrix_random_sampling(
+            -Contraction
+            - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
+            reduce=reduce
+        )
         # # tf = time.time()
-        loss_Q = gershgorin_loss(-Contraction,  
-            reduce=reduce)
+        # loss_Q2 = gershgorin_loss(-Contraction,  
+            # reduce=reduce, useopt=useopt)
         # loss_Q = loss_Q1 + loss_Q2
         # trueigs = torch.linalg.eigvalsh(Contraction).max(dim=1)[0]
         # # print("true eigs: ", trueigs.shape, trueigs)
         # loss_Q3 = (trueigs[trueigs > 0]).mean()
         # print("loss_Q: ", loss_Q.shape, loss_Q)
-        # loss_Q = loss_Q1 + loss_Q2 + loss_Q3
+        loss_Q = loss_Q1 # + loss_Q2 #+ loss_Q3
         tf = time.time()
 
         loss_C1 = loss_pos_matrix_random_sampling(
@@ -604,14 +641,27 @@ def main(args=None):
                 # + M.detach().matmul(A + B.matmul(K))
                 # + 2 * _lambda/2 * M.detach())
             Q_eigs = torch.linalg.eigvalsh(Contraction)
+            Q_eigs_max = Q_eigs.max(dim=1)[0]
             true_eig_min = Q_eigs.min(dim=1)[0].min().item()
-            true_eig_max = Q_eigs.max(dim=1)[0].max().item()
+            true_eig_max =           Q_eigs_max.max().item()
             true_eig_mean = Q_eigs.mean().item()
+            if CEs:
+                Qvi = Q_eigs_max.detach() > 0.0 # Qvi = Q violation indices
+                QCEs = CounterExamples(x[Qvi, :], xref[Qvi, :], uref[Qvi, :], Q_eigs_max[Qvi])
+            else:
+                QCEs = CounterExamples(torch.zeros((1,1)), torch.zeros((1,1)), torch.zeros((1,1)), torch.zeros((1,1)))
 
             Q_eigbounds = -gersh_criterion(-Contraction) # upperbound with the negations like that
             Q_eigbounds_min = Q_eigbounds.min().item()
             Q_eigbounds_max = Q_eigbounds.max().item()
             Q_eigbounds_mean = Q_eigbounds.mean().item()
+            Qb_p1 = Q_eigbounds.cpu().detach().numpy() < 0.0 # passing indices
+            if CEs:
+                Qbvi = np.logical_not(Qb_p1) # Qbvi = Q bound violation indices
+                print("---------------------------------type of x: ", type(x))
+                QbCEs = CounterExamples(x[Qbvi, :], xref[Qbvi, :], uref[Qbvi, :], Q_eigbounds[Qbvi])
+            else:
+                QbCEs = CounterExamples(torch.zeros((1,1)), torch.zeros((1,1)), torch.zeros((1,1)), torch.zeros((1,1)))
 
             M_eigs = torch.linalg.eigh(M)[0]
             M_eigs_min = M_eigs.min(dim=1)[0] # max eig for each datapoint in batch
@@ -622,36 +672,35 @@ def main(args=None):
             # p1 is the number of datapoints where all the eigenvalues are < 0 
             return (
                 loss,
-                ((Q_eigs >= 0).sum(dim=1) == 0)
-                .cpu()
-                .detach()
-                .numpy(),
+                ((Q_eigs >= 0).sum(dim=1) == 0).cpu().detach().numpy(),
                 ((torch.linalg.eigh(C1_LHS_1)[0] >= 0).sum(dim=1) == 0).cpu().detach().numpy(),
-                sum(
-                    [1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s]
-                ).item(),
+                sum([1.0 * (C2**2).reshape(bs, -1).sum(dim=1).mean() for C2 in C2s]).item(),
                 (EigStats(true_eig_max, true_eig_min, true_eig_mean),
                  MeigStats(M_eig_max, M_eig_min, M_cond_max),
                  EigStats(Q_eigbounds_max, Q_eigbounds_min, Q_eigbounds_mean),
+                 QCEs, 
+                 QbCEs,
+                 Qb_p1,
                  (tf-ts)),
             )
         else:
             return loss, None, None, None, tf-ts
 
 
-    optimizer = torch.optim.Adam(
-        list(model_W.parameters())
-        + list(model_Wbot.parameters())
-        + list(model_u_w1.parameters()),
-        lr=args.learning_rate,
-    )
+    if not args.load_model:
+        optimizer = torch.optim.Adam(
+            list(model_W.parameters())
+            + list(model_Wbot.parameters())
+            + list(model_u_w1.parameters()),
+            lr=args.learning_rate,
+        )
 
-    hardtanh_optimizer = torch.optim.Adam(
-        list(model_W_hard.parameters())
-        + list(model_Wbot_hard.parameters())
-        + list(model_u_w1_hard.parameters()),
-        lr=args.learning_rate,
-    )
+        hardtanh_optimizer = torch.optim.Adam(
+            list(model_W_hard.parameters())
+            + list(model_Wbot_hard.parameters())
+            + list(model_u_w1_hard.parameters()),
+            lr=args.learning_rate,
+        )
 
     def regularize(epoch, reg_coeff):
         loss = 0.0
@@ -701,6 +750,7 @@ def main(args=None):
                    acc,
                    detach,
                    clone,
+                   useopt,
                    verbose=False):
         """
         This function calculates one batch of adversarial inputs using a PGD attack.
@@ -738,7 +788,8 @@ def main(args=None):
             detach=detach,
             clone=clone,
             zero_order=False,
-            reduce=False # key to computing loss value for every example in the batch
+            reduce=False, # key to computing loss value for every example in the batch
+            useopt=useopt
         )
         batch_loss_uptbd = batch_losses_uptbd[0]
         #  keep track of most adversarial input found so far for each training example
@@ -748,7 +799,7 @@ def main(args=None):
             max_loss.cuda()
             max_delta.cuda()
         if acc:
-            _,_, _, times = stats
+            _, _, _, _, _, _, times = stats
         else:
             times =stats
         total_Q_time += times
@@ -793,9 +844,10 @@ def main(args=None):
                 detach=detach,
                 clone=clone,
                 zero_order=False,
+                useopt=useopt
             )
             if acc:
-                _, _, _, times = stats
+                _, _, _, _, _, _, times = stats
             else:
                 times = stats
             total_Q_time += times
@@ -852,7 +904,8 @@ def main(args=None):
             detach=detach,
             clone=clone,
             zero_order=False,
-            reduce=False # key to computing loss value for every example in the batch
+            reduce=False, # key to computing loss value for every example in the batch
+            useopt=useopt
         )
         batch_loss = batch_losses[0] # only use Q loss
 
@@ -866,7 +919,7 @@ def main(args=None):
         max_delta[mor_bl >= max_loss] = mor_delta.detach()[mor_bl >= max_loss]
         max_loss = torch.max(max_loss, mor_bl)
         if acc:
-            _,_, _, times = stats
+            _, _, _, _, _, _,times = stats
         else:
             times =stats
         total_Q_time += times
@@ -927,6 +980,14 @@ def main(args=None):
             # print("after attack: xerr_ptb.max(): ", x_err_ptb.max(), ", xerr_ptb.min(): ", x_err_ptb.min())
         return max_delta, stats, total_Q_time
 
+    def package_CEs(CE_list):
+        x, xref, uref, val = zip(*CE_list) 
+        CEs = CounterExamples(torch.cat(x, dim=0),
+                            torch.cat(xref, dim=0),
+                            torch.cat(uref, dim=0),
+                            torch.cat(val, dim=0))
+        return CEs
+
     def trainval(
         X,
         bs=args.bs,
@@ -939,7 +1000,8 @@ def main(args=None):
         reg_coeff=args.reg_coeff,
         ptb_sched=None,
         robust=False,
-        verbose=False
+        verbose=False,
+        CEs=False,
     ):  
         """
         This function implements 1 epoch of training with or without PGD attack.
@@ -968,6 +1030,9 @@ def main(args=None):
         Geigmin = 1e6
         Geigmax = 0.0
         Geigmean = 0.0
+        totalQCEs = []
+        totalQbCEs = []
+        total_p1b = 0
 
         num_train_batches = len(X.dataset) // bs
         
@@ -991,6 +1056,7 @@ def main(args=None):
                                         acc,
                                         detach,
                                         clone,
+                                        useopt=args.useopt,
                                         verbose=verbose)
                     total_num_new_CEs += stats.num_new_CEs 
                     total_num_lost_CEs += stats.num_lost_CEs   
@@ -1011,7 +1077,9 @@ def main(args=None):
                 acc=acc,
                 detach=detach,
                 clone=clone,
-                zero_order=False,      
+                zero_order=False,
+                CEs=CEs,
+                useopt=args.useopt      
             )
 
             if reg_coeff > 0.0:
@@ -1037,7 +1105,7 @@ def main(args=None):
                 total_p1 += p1.sum()
                 total_p2 += p2.sum()
                 total_l3 += l3 * x.shape[0]
-                eigstats, Meigstats, Geigstats, times = stats
+                eigstats, Meigstats, Geigstats, QCEs, QbCEs, Qb_p1, times = stats
                 eigmin  = np.minimum(eigstats.min, eigmin)
                 eigmax = np.maximum(eigstats.max, eigmax)
                 eigmean = (b*eigmean + eigstats.mean)/(b+1)
@@ -1047,6 +1115,9 @@ def main(args=None):
                 Geigmin  = np.minimum(Geigstats.min, Geigmin)
                 Geigmax = np.maximum(Geigstats.max, Geigmax)
                 Geigmean = (b*Geigmean + Geigstats.mean)/(b+1)
+                total_p1b += Qb_p1.sum()
+                totalQCEs.append(QCEs)
+                totalQbCEs.append(QbCEs)
             else:
                 times = stats
             total_Q_time += times
@@ -1055,8 +1126,20 @@ def main(args=None):
         eigstats = EigStats(eigmax, eigmin, eigmean)
         Geigstats = EigStats(Geigmax, Geigmin, Geigmean)
         meigstats = MeigStats(Meigmax, Meigmin, Meigcondmax)
-        CE_stats = Stats(total_num_new_CEs, total_num_lost_CEs) 
-        return total_loss / len(X.dataset), total_p1 / len(X.dataset), total_p2 / len(X.dataset), total_l3 / len(X.dataset), (eigstats, meigstats, Geigstats, CE_stats, losses, total_Q_time / len(X.dataset))
+        CE_stats = Stats(total_num_new_CEs, total_num_lost_CEs)  # CEs found within PGD attack
+        # pdb.set_trace()
+        if acc:
+            allQCEs = package_CEs(totalQCEs) # CEs found in forward during testing pass regardless of PGD attack or not
+            allQbCEs = package_CEs(totalQbCEs) # gershbound CEs
+        else:
+            allQCEs = []
+            allQbCEs = []
+
+        return (total_loss / len(X.dataset),
+                total_p1 / len(X.dataset), 
+                total_p2 / len(X.dataset), 
+                total_l3 / len(X.dataset), 
+                (eigstats, meigstats, Geigstats, CE_stats, losses, allQCEs, allQbCEs, total_p1b / len(X.dataset), total_Q_time / len(X.dataset)))
 
 
     best_acc = 0
@@ -1070,102 +1153,57 @@ def main(args=None):
 
 
     if args.load_model:
-        # load the metric and controller
-        filename_controller = args.log + "/controller_best.pth.tar"
-        filename_metric = args.log + "/metric_best.pth.tar"
-        map_location = "cuda" if args.use_cuda else "cpu"
-        W_func = torch.load(filename_metric, map_location)
-        u_func = torch.load(filename_controller, map_location)
+        # load the metric and controller # should already be loaded
+        # filename_controller = args.log + "/controller_best.pth.tar"
+        # filename_metric = args.log + "/metric_best.pth.tar"
+        # map_location = "cuda" if args.use_cuda else "cpu"
+        # W_func = torch.load(filename_metric, map_location)
+        # u_func = torch.load(filename_controller, map_location)
 
-        # Unpack the test data
-        x = []
-        xref = []
-        uref = []
-        N = 30000
-        for id in range(len(X_te[:N])):
-            if args.use_cuda:
-                x.append(torch.from_numpy(X_te[id][0]).float().cuda())
-                xref.append(torch.from_numpy(X_te[id][1]).float().cuda())
-                uref.append(torch.from_numpy(X_te[id][2]).float().cuda())
-            else:
-                x.append(torch.from_numpy(X_te[id][0]).float())
-                xref.append(torch.from_numpy(X_te[id][1]).float())
-                uref.append(torch.from_numpy(X_te[id][2]).float())
+        ptb_schedule = lambda t: args.robust_eps
+        _, p1, p2, l3, test_stats = trainval(X_te_DL, 
+                                                train=False, 
+                                                _lambda=args.test_lambda, 
+                                                acc=True, 
+                                                detach=False, 
+                                                ptb_sched = ptb_schedule, 
+                                                robust=args.robust_train,
+                                                CEs=True)
 
-        x, xref, uref = (torch.stack(d).detach() for d in (x, xref, uref))
-        x = x.requires_grad_()
-
-        # get the contraction condition
-        bs = x.shape[0]
-        if INVERSE_METRIC:
-            W = W_func(x)
-            M = torch.inverse(W)
-        else:
-            M = W_func(x)
-            W = torch.inverse(M)
-        f = f_func(x)
-        B = B_func(x)
-        DfDx = Jacobian(f, x)
-        DBDx = torch.zeros(bs, num_dim_x, num_dim_x, num_dim_control).type(x.dtype)
-        for i in range(num_dim_control):
-            DBDx[:, :, :, i] = Jacobian(B[:, :, i].unsqueeze(-1), x)
-
-        _Bbot = Bbot_func(x)
-        u = u_func(x, x - xref, uref)  # u: bs x m x 1 # TODO: x - xref
-
-        K = Jacobian(u, x)
-        # temp_u_func = lambda x: u_func(x, x - xref, uref)
-        # K = zero_order_jacobian_estimate(temp_u_func, x)
-
-        A = DfDx + sum(
-            [
-                u[:, i, 0].unsqueeze(-1).unsqueeze(-1) * DBDx[:, :, :, i]
-                for i in range(num_dim_control)
-            ]
-        )
-        dot_x = f + B.matmul(u)
-        dot_M = weighted_gradients(M, dot_x, x, detach=False)  # DMDt
-        # dot_M = weighted_gradients_zero_order(W_func, dot_x, x, detach=False)  # DMDt
-        _lambda = 0.0
-        Contraction = (
-            dot_M
-            + (A + B.matmul(K)).transpose(1, 2).matmul(M)
-            + M.matmul(A + B.matmul(K))
-            + 2 * _lambda * M
-        )
-
+        eigstats, meigstats, Geigstats, _, losses, allQCEs, allQbCEs, p1b, Q_time = test_stats
         # Plot the maximum eigenvalue of the contraction condition
-        max_eig_Q = torch.linalg.eigh(Contraction)[0].max(dim=1)[0].detach()
-        violation = max_eig_Q > 0.0
+        Nte = len(X_te_DL.dataset)
         print("-------------")
-        print(f"Total # violations: {violation.sum()} ({violation.sum() * 100 / N} %)")
-        print("violation: ", violation)
-        if violation.any():
-            print(f"mean violation: {max_eig_Q[violation].mean()} ({max_eig_Q[violation].max()} max)")
+        print(f"Total # true Q violations: {Nte-p1*Nte} ({(1 - p1)*100} %)")
+        print(f"Total # Q bound violations: {Nte-p1b*Nte} ({(1 - p1b)*100} %)")
+        if p1 < 1.0:
+            print(f"mean trueig violation: {allQCEs.val.mean()} ({allQCEs.val.max()} max)")
+        if p1b < 1.0:
+            print(f"mean eigbound violation: {allQbCEs.val.mean()} ({allQbCEs.val.max()} max)")
         print("-------------")
-        fig, axs = plt.subplots(4, 4)
-        for i in range(4):
-            for j in range(4):
-                axs[i, j].scatter(
-                    x[violation, j].detach().cpu(),
-                    x[violation, i].detach().cpu(),
-                    c=max_eig_Q[violation].cpu(),
-                    s=0.1,
-                )
-                axs[i, j].set_xlabel(f"x_{j}")
-                axs[i, j].set_ylabel(f"x_{i}")
-                axs[i, j].set_xlim(
-                    [
-                        x[:, j].detach().min().cpu() - 0.1,
-                        x[:, j].detach().max().cpu() + 0.1,
-                    ]
-                )
-                axs[i, j].set_ylim(
-                    [
-                        x[:, i].detach().min().cpu() - 0.1,
-                        x[:, i].detach().max().cpu() + 0.1,
-                    ]
-                )
+        # fig, axs = plt.subplots(4, 4)
+        # for i in range(4):
+        #     for j in range(4):
+        #         axs[i, j].scatter(
+        #             x[violation, j].detach().cpu(),
+        #             x[violation, i].detach().cpu(),
+        #             c=max_eig_Q[violation].cpu(),
+        #             s=0.1,
+        #         )
+        #         axs[i, j].set_xlabel(f"x_{j}")
+        #         axs[i, j].set_ylabel(f"x_{i}")
+        #         axs[i, j].set_xlim(
+        #             [
+        #                 x[:, j].detach().min().cpu() - 0.1,
+        #                 x[:, j].detach().max().cpu() + 0.1,
+        #             ]
+        #         )
+        #         axs[i, j].set_ylim(
+        #             [
+        #                 x[:, i].detach().min().cpu() - 0.1,
+        #                 x[:, i].detach().max().cpu() + 0.1,
+        #             ]
+        #         )
 
         # fig = plt.figure()
         # # ax = fig.add_subplot(projection="3d")
@@ -1198,7 +1236,7 @@ def main(args=None):
         # axs[1].set_title("MABK")
         # axs[2].set_title("Q")
 
-        plt.show()
+        # plt.show()
 
         sys.exit()
 
@@ -1265,7 +1303,7 @@ def main(args=None):
                                     ptb_sched = ptb_schedule,
                                     robust=args.robust_train
                                 )
-        _, _, _, CE_stats, _, Q_time_tr = train_stats
+        _, _, _, CE_stats, _, QCEs_tr, QbCEs_tr, p1b_tr, Q_time_tr = train_stats
         if args.robust_train:
             writer.add_scalar("number new CE from training", CE_stats.num_new_CEs, epoch)
             writer.add_scalar("number lost CE from training", CE_stats.num_lost_CEs, epoch)
@@ -1275,7 +1313,8 @@ def main(args=None):
         # writer.add_scalar("traineig/min", train_eig_stats.min, epoch)
         # writer.add_scalar("traineig/mean", train_eig_stats.mean, epoch) 
 
-        ### now test ###
+        ### now test ###################################################################
+        # pdb.set_trace()
         loss, p1, p2, l3, test_stats = trainval(X_te_DL, 
                                                 train=False, 
                                                 _lambda=args.test_lambda, 
@@ -1284,8 +1323,8 @@ def main(args=None):
                                                 epoch=epoch,
                                                 ptb_sched = ptb_schedule, 
                                                 robust=args.robust_train)
-        print("Epoch %d: Testing loss/p1/p2/l3: " % epoch, loss, p1, p2, l3)
-        eig_stats, meig_stats, geig_stats, CE_stats, losses, Q_time = test_stats
+        eig_stats, meig_stats, geig_stats, CE_stats, losses, QCEs, QbCEs, p1b, Q_time = test_stats
+        print("Epoch %d: Testing loss/p1/p1b/p2/l3: " % epoch, loss, p1, p1b, p2, l3)
         writer.add_scalar("Avg Q loss computation time (test): ", Q_time, epoch)
         if len(losses) == 4:
             loss_Q, loss_C1, loss_W, loss_C2 = losses
@@ -1295,6 +1334,7 @@ def main(args=None):
 
         writer.add_scalar("Loss", loss, epoch)
         writer.add_scalar("% of pts with max eig Q < 0", p1, epoch)
+        writer.add_scalar("% of pts with max eigbound Q < 0", p1b, epoch)
         writer.add_scalar("% of pts with max eig C1_LHS < 0", p2, epoch)
         writer.add_scalar("eig/max", eig_stats.max, epoch)
         writer.add_scalar("eig/min", eig_stats.min, epoch)
