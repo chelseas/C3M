@@ -6,13 +6,8 @@ from np2pth import get_system_wrapper, get_controller_wrapper, get_metric_wrappe
 import importlib
 from utils import EulerIntegrate
 import time
-
 import os
 import sys
-
-sys.path.append("systems")
-sys.path.append("configs")
-sys.path.append("models")
 import argparse
 
 SMALL_SIZE = 8
@@ -36,14 +31,20 @@ top = 0.925  # the top of the subplots of the figure
 
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("--task", type=str, default="CAR")
+parser.add_argument("--log", type=str)
 parser.add_argument("--pretrained", type=str)
 parser.add_argument("--pretrained_W", type=str)
 parser.add_argument("--plot_type", type=str, default="2D")
 parser.add_argument("--plot_dims", nargs="+", type=int, default=[0, 1])
 parser.add_argument("--nTraj", type=int, default=10)
-parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--seed", type=int, default=np.random.randint(100))
 parser.add_argument("--sigma", type=float, default=0.0)
 args = parser.parse_args()
+
+sys.path.append(args.log)
+sys.path.append(args.log + "/systems")
+sys.path.append(args.log + "/configs")
+sys.path.append(args.log + "/models")
 
 np.random.seed(args.seed)
 
