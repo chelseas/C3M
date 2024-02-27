@@ -132,7 +132,7 @@ def build_model(log, comparison=False):
             self.W_func = W_func
             self.DfDx = system.DfDx_func
 
-        def forward(self, xall):
+        def forward(self, xall, criterion="direct"):
             bsz = xall.shape[0]
             xall = xall.reshape(bsz, xall.shape[1], 1)
 
@@ -176,15 +176,19 @@ def build_model(log, comparison=False):
                     + 2 * lambda_ * M
             )
             # print("Q.shape: ", Q.shape) # should be (bs, num_dim_x, num_dim_x)
-            # compute Gershgorin approximation of eigen values
-            diagonal_entries = torch.diagonal(Q, dim1=-2, dim2=-1)
-            # print("diagonal_entries.shape: ", diagonal_entries.shape)
-            off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
-            # print("off_diagonal_sum.shape: ", off_diagonal_sum.shape)
-            # Compute upper bounds on each eigenvalue of Q
-            gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
-            # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
-            return gersh_ub_eig_Q
+            if criterion == "gersh":
+                # compute Gershgorin approximation of eigen values
+                diagonal_entries = torch.diagonal(Q, dim1=-2, dim2=-1)
+                # print("diagonal_entries.shape: ", diagonal_entries.shape)
+                off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
+                # print("off_diagonal_sum.shape: ", off_diagonal_sum.shape)
+                # Compute upper bounds on each eigenvalue of Q
+                gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
+                # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
+                return gersh_ub_eig_Q
+            elif criterion == "direct":
+                print("Q.shape: ", Q.shape)
+                return x.transpose().matmul(Q).matmul(x)
 
     # May not be update-to-date
     class CertVerComparison(nn.Module):
@@ -199,7 +203,7 @@ def build_model(log, comparison=False):
             self.u_func = u_func
             self.W_func = W_func
             self.DfDx = system.DfDx_func
-        def forward(self, xall):
+        def forward(self, xall, criterion="direct"):
             # print("xall.shape = ", xall.shape)
             xall = xall.unsqueeze(-1)
             x = xall[:,:num_dim_x]
@@ -244,15 +248,19 @@ def build_model(log, comparison=False):
                     + 2 * lambda_ * M
             )
             # print("Q.shape: ", Q.shape) # should be (bs, num_dim_x, num_dim_x)
-            # compute Gershgorin approximation of eigen values
-            diagonal_entries = torch.diagonal(Q, dim1=-2, dim2=-1)
-            # print("diagonal_entries.shape: ", diagonal_entries.shape)
-            off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
-            # print("off_diagonal_sum.shape: ", off_diagonal_sum.shape)
-            # Compute upper bounds on each eigenvalue of Q
-            gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
-            # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
-            return gersh_ub_eig_Q
+            if criterion == "gersh":
+                # compute Gershgorin approximation of eigen values
+                diagonal_entries = torch.diagonal(Q, dim1=-2, dim2=-1)
+                # print("diagonal_entries.shape: ", diagonal_entries.shape)
+                off_diagonal_sum = torch.abs(Q).sum(dim=-1) - torch.abs(diagonal_entries) # row sum
+                # print("off_diagonal_sum.shape: ", off_diagonal_sum.shape)
+                # Compute upper bounds on each eigenvalue of Q
+                gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
+                # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
+                return gersh_ub_eig_Q
+            elif criterion == "direct":
+                print("Q.shape: ", Q.shape)
+                return x.transpose().matmul(Q).matmul(x)
 
     # Function utilized by the complete verifier to build the model.
     certvermodel = CertVerModel(xall, replace="tanh")
