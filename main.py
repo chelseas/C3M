@@ -185,8 +185,7 @@ def main(args=None):
     if args.use_cuda:
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
-    epsilon = args._lambda
-    print("Epsilon/Lambda: ", epsilon, " test eps/lamb: ", args.test_lambda)
+    print("Lambda: ", args._lambda, " test lamb: ", args.test_lambda)
     if args.reg_coeff > 0.0:
         print("Using l1 regularization with coeff: ", args.reg_coeff)
 
@@ -594,22 +593,22 @@ def main(args=None):
         ts = time.time()
         loss_Q1 = loss_pos_matrix_random_sampling(
             -Contraction
-            - epsilon * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
+            - _lambda * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
             reduce=reduce
         )
         # # tf = time.time()
-        # loss_Q2 = gershgorin_loss(-Contraction,  
-            # reduce=reduce, useopt=useopt)
+        loss_Q2 = gershgorin_loss(-Contraction,  
+            reduce=reduce, useopt=useopt)
         # loss_Q = loss_Q1 + loss_Q2
         # trueigs = torch.linalg.eigvalsh(Contraction).max(dim=1)[0]
         # # print("true eigs: ", trueigs.shape, trueigs)
         # loss_Q3 = (trueigs[trueigs > 0]).mean()
         # print("loss_Q: ", loss_Q.shape, loss_Q)
-        loss_Q = loss_Q1 # + loss_Q2 #+ loss_Q3
+        loss_Q = loss_Q1 + loss_Q2 #+ loss_Q3
         tf = time.time()
 
         loss_C1 = loss_pos_matrix_random_sampling(
-            -C1_LHS_1 - epsilon * torch.eye(C1_LHS_1.shape[-1]).unsqueeze(0).type(x.dtype),
+            -C1_LHS_1 - _lambda * torch.eye(C1_LHS_1.shape[-1]).unsqueeze(0).type(x.dtype),
             reduce=reduce
         )
         loss_M = loss_pos_matrix_random_sampling(
