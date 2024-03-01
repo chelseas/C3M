@@ -1,6 +1,7 @@
 # preamble
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 import torchviz
 import importlib
 import sys
@@ -8,7 +9,7 @@ import os
 import colored_traceback
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
-from auto_LiRPA.jacobian import JacobianOP, GradNorm
+from auto_LiRPA.jacobian import JacobianOP
 
 sys.path.append("systems")
 sys.path.append("configs")
@@ -19,13 +20,10 @@ from using_crown_utils import Jacobian, Jacobian_Matrix, weighted_gradients, cle
 
 colored_traceback.add_hook(always=True)
 
-
-# options
-log = os.path.join(os.path.dirname(__file__), "logs/1129.test_l1reg_3") # New model
-# log = os.path.join(os.path.dirname(__file__), "logs/car_red_2") # New model
-# log = os.path.join(os.path.dirname(__file__), "saved_models/Y_eps0p0")
-# log = "../C3M/saved_models/Y_eps0p0" # old model
-# log = "../C3M/logs/car_red_2"  # New model
+from main import EigStats, MeigStats
+import __main__
+setattr(__main__, "EigStats", EigStats)
+setattr(__main__, "MeigStats", MeigStats)
 
 
 def build_model(log, comparison=False):
@@ -105,11 +103,15 @@ def build_model(log, comparison=False):
         trained_model = torch.load(filename_model, map_location)
         w_lb = trained_model['args'].w_lb
         print("w_lb = ", w_lb)
+        M_depth = trained_model['args'].M_depth
+        u_depth = trained_model['args'].u_depth
         # load saved weights
         W_func_loaded = torch.load(filename_metric, map_location)
         u_func_loaded = torch.load(filename_controller, map_location)
         # create new version of network with modified forward function
-        model_W, model_Wbot, model_u_w1, W_func, u_func =model.get_model_mixed(num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=mixing)
+        model_W, model_Wbot, model_u_w1, W_func, u_func =model.get_model_mixed(
+            num_dim_x, num_dim_control, w_lb, use_cuda=False, mixing=mixing,
+            M_depth=M_depth, u_depth=u_depth)
         # put trained weights into new function
         W_func.load_state_dict(W_func_loaded.state_dict())
         u_func.load_state_dict(u_func_loaded.state_dict())
@@ -120,7 +122,7 @@ def build_model(log, comparison=False):
         return W_func, u_func
 
     class CertVerModel(nn.Module):
-        def __init__(self, x, replace="relu"):
+        def __init__(self, x, replace="relu", xerr_constraint=False):
             super(CertVerModel, self).__init__()
             #clean upsupported ops
             self.f_func = f_func
@@ -131,6 +133,7 @@ def build_model(log, comparison=False):
             self.u_func = u_func
             self.W_func = W_func
             self.DfDx = system.DfDx_func
+            self.xerr_constraint = xerr_constraint
 
         def forward(self, xall, criterion="direct"):
             bsz = xall.shape[0]
@@ -185,10 +188,20 @@ def build_model(log, comparison=False):
                 # Compute upper bounds on each eigenvalue of Q
                 gersh_ub_eig_Q = diagonal_entries + off_diagonal_sum
                 # not supported: gersh_ub_eig_Q_max = gersh_ub_eig_Q.amax(dim=-1)
-                return gersh_ub_eig_Q
+                ret = gersh_ub_eig_Q
             elif criterion == "direct":
                 print("Q.shape: ", Q.shape)
-                return x.transpose().matmul(Q).matmul(x)
+                ret = x.transpose().matmul(Q).matmul(x)
+
+            if not self.xerr_constraint:
+                return ret
+            else:
+                # Add an additional output for the x_err constraint
+                # Hard-coded: |x_err| <= 0.1
+                xerr = xerr.squeeze(-1)
+                xerr_violation = (F.relu(xerr - 0.1) + F.relu(-0.1 - xerr)).sum(
+                    dim=-1, keepdim=True)
+                return torch.concat([ret, xerr_violation], dim=-1)
 
     # May not be update-to-date
     class CertVerComparison(nn.Module):
@@ -262,17 +275,17 @@ def build_model(log, comparison=False):
                 print("Q.shape: ", Q.shape)
                 return x.transpose().matmul(Q).matmul(x)
 
-    # Function utilized by the complete verifier to build the model.
-    certvermodel = CertVerModel(xall, replace="tanh")
-
     if comparison:
+        certvermodel = CertVerModel(xall, replace="tanh")
         certvermodel_comparison = CertVerComparison(xall, replace="tanh")
         return certvermodel, certvermodel_comparison, xall, xall_ptb
     else:
+        certvermodel = CertVerModel(xall, replace="tanh", xerr_constraint=True)
         return certvermodel
 
 
 if __name__ == '__main__':
+    log = os.path.join(os.path.dirname(__file__), "logs/1129.test_l1reg_3") # New model
     certvermodel, certvermodel_comparison, xall, xall_ptb = build_model(log, comparison=True)
 
     print("crown: ")
