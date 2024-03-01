@@ -9,7 +9,7 @@ args = parser.parse_args()
 num_dim_x = 4
 num_dim_control = 2
 num_input = num_dim_x * 2 + num_dim_control
-num_output = 4
+num_output = 1
 
 # x: x, xref, uref
 x_L = torch.tensor([-5, -5, -torch.pi, 1,

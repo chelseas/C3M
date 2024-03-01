@@ -132,3 +132,4 @@ dmypy.json
 
 Digraph.gv
 *.vnnlib.compiled
+specs/rand*

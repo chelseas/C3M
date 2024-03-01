@@ -191,7 +191,7 @@ def build_model(log, comparison=False):
                 ret = gersh_ub_eig_Q
             elif criterion == "direct":
                 print("Q.shape: ", Q.shape)
-                ret = x.transpose().matmul(Q).matmul(x)
+                ret = x.transpose(-1, -2).matmul(Q).matmul(x).squeeze(-1)
 
             if not self.xerr_constraint:
                 return ret
@@ -273,7 +273,7 @@ def build_model(log, comparison=False):
                 return gersh_ub_eig_Q
             elif criterion == "direct":
                 print("Q.shape: ", Q.shape)
-                return x.transpose().matmul(Q).matmul(x)
+                return x.transpose(-1, -2).matmul(Q).matmul(x).squeeze(-1)
 
     if comparison:
         certvermodel = CertVerModel(xall, replace="tanh")
