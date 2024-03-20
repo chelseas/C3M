@@ -38,7 +38,7 @@ for t in range(args.n):
         for j in range(num_dim_x):
             if i != j:
                 z_L_[j] = -math.sqrt(1 - 1. / num_dim_x)
-                z_U_[j] = -math.sqrt(1 - 1. / num_dim_x)
+                z_U_[j] = math.sqrt(1 - 1. / num_dim_x)
         z_L_[i] = math.sqrt(1. / num_dim_x)
         z_U_[i] = 1
         x_L_all.append(torch.concat([x_L_, z_L_]))
