@@ -145,7 +145,9 @@ def build_model(log, comparison=False):
             # print("xall.shape = ", xall.shape)
             x = xall[:,:num_dim_x]
             xref = xall[:,num_dim_x:num_dim_x*2]
-            uref = xall[:,num_dim_x*2:]
+            uref = xall[:,num_dim_x*2:num_dim_x*2+num_dim_control]
+            if criterion == "direct":
+                z = xall[:,num_dim_x*2+num_dim_control:]
             xerr = x - xref
             u = self.u_func(x, xerr, uref)
             K = JacobianOP.apply(u, x).reshape(bsz, num_dim_control, num_dim_x)
@@ -191,7 +193,7 @@ def build_model(log, comparison=False):
                 ret = gersh_ub_eig_Q
             elif criterion == "direct":
                 print("Q.shape: ", Q.shape)
-                ret = x.transpose(-1, -2).matmul(Q).matmul(x).squeeze(-1)
+                ret = z.transpose(-1, -2).matmul(Q).matmul(z).squeeze(-1)
 
             if not self.xerr_constraint:
                 return ret
@@ -221,7 +223,9 @@ def build_model(log, comparison=False):
             xall = xall.unsqueeze(-1)
             x = xall[:,:num_dim_x]
             xref = xall[:,num_dim_x:num_dim_x*2]
-            uref = xall[:,num_dim_x*2:]
+            uref = xall[:,num_dim_x*2:num_dim_x*2+num_dim_control]
+            if criterion == "direct":
+                z = xall[:,num_dim_x*2+num_dim_control:]
             def get_u(x, xref, uref):
                 xerr = x - xref
                 u = self.u_func(x.requires_grad_(True),
@@ -273,7 +277,7 @@ def build_model(log, comparison=False):
                 return gersh_ub_eig_Q
             elif criterion == "direct":
                 print("Q.shape: ", Q.shape)
-                return x.transpose(-1, -2).matmul(Q).matmul(x).squeeze(-1)
+                return z.transpose(-1, -2).matmul(Q).matmul(z).squeeze(-1)
 
     if comparison:
         certvermodel = CertVerModel(xall, replace="tanh")

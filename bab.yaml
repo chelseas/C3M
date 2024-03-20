@@ -8,7 +8,7 @@ general:
 model:
   name: >-
     Customized("using_crown_2.py", "build_model", log="logs/three_layers")
-  input_shape: [-1, 10]
+  input_shape: [-1, 14]
 specification:
   rhs_offset: 0
 attack:
@@ -30,5 +30,5 @@ bab:
       bf_rhs_offset: 1.e-4
       bf_backup_thresh: 0.01
       bf_zero_crossing_score: True
-      sb_margin_weight: 0.1
+      sb_margin_weight: 0 #0.1
       sb_coeff_thresh: 0.2
