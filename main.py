@@ -383,7 +383,7 @@ def main(args=None):
             return (zero_order_jacobian_estimate(f, x) * v.view(bs, 1, 1, -1)).sum(dim=3)
 
 
-    K = 1024
+    K = 2048
 
 
     # def loss_pos_matrix_random_sampling(A):
@@ -413,7 +413,7 @@ def main(args=None):
             negative_index = zTAz.detach().cpu().numpy() < 0
             if negative_index.sum() > 0:
                 negative_zTAz = zTAz[negative_index]
-                return -1.0 * (negative_zTAz.mean())
+                return -1.0 * (negative_zTAz.sum()/K)
             else:
                 return torch.tensor(0.0).type(z.dtype).requires_grad_()
         else: # no reduce
@@ -426,7 +426,7 @@ def main(args=None):
             # next average neg values
             num_neg_each_row = negative_index.sum(-1) # if this is zero for any data point, don't want to divide by zero
             num_neg_each_row[num_neg_each_row == 0.0] = 1.0 # 0/1 = 0
-            neg_mean = zTAz.sum(dim=-1) / num_neg_each_row 
+            neg_mean = zTAz.sum(dim=-1) / K #num_neg_each_row 
             # print("loss dim: ", neg_mean.shape)
             return -1.0 * neg_mean
 
