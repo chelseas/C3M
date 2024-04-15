@@ -115,11 +115,11 @@ def cmdlineparse(args):
         "--robust_attack_iters_test",
         dest="robust_attack_iters_test",
         type=int,
-        default=5,
+        default=20,
         help="Number of iterations to create adversarial example during robust testing.",
     )
     parser.add_argument(
-        '--robust_restarts', dest="robust_restarts", default=1, type=int, help=" number of times that the adversarial attack can restart during adversarial training. A hyper parameter.")
+        '--robust_restarts', dest="robust_restarts", default=2, type=int, help=" number of times that the adversarial attack can restart during adversarial training. A hyper parameter.")
     parser.add_argument(
         "--reg_coeff",
         dest="reg_coeff",
@@ -160,6 +160,13 @@ def cmdlineparse(args):
         dest="useopt",
         action="store_false",
         help="An attempt at a gershgorin loss that has better gradient sharing. ",
+    )
+    parser.add_argument(
+        "--loss_type",
+        dest="loss_type",
+        type=str,
+        default="sampling",
+        help="Loss function. Currently supported are sampling, mixed_samp_gersh, and gersh.",
     )
     args = parser.parse_args(args)
     return args
@@ -407,7 +414,7 @@ def main(args=None):
         z = torch.randn(K, A.size(-1))
         if args.use_cuda:
             z = z.cuda()
-        z = z / z.norm(dim=1, keepdim=True)
+        z = z / z.norm(dim=1, p=2, keepdim=True) # put z data on surface of unit ball
         if reduce:
             zTAz = (z.matmul(A) * z.view(1, K, -1)).sum(dim=2).view(-1) # squeeze: bs*K
             negative_index = zTAz.detach().cpu().numpy() < 0
@@ -479,7 +486,8 @@ def main(args=None):
         reduce=True,
         debug=False,
         CEs=False,
-        useopt=True
+        useopt=True,
+        loss_type="sampling",
     ):
         # x: bs x n x 1
         bs = x.shape[0]
@@ -567,6 +575,10 @@ def main(args=None):
                 + M.matmul(A + B.matmul(K))
                 + 2 * _lambda * M
             )
+        # print("M: ", M[0,:,:])
+        # print("A, B: ", A[0,:,:], B[0,:,:])
+        # print("Mdot: ", dot_M[0,:,:])
+        # print("Q[0]: ", Contraction[0,:,:])
 
         # C1
         C1_inner = (
@@ -591,20 +603,32 @@ def main(args=None):
             C2s.append(C2)
 
         ts = time.time()
-        loss_Q1 = loss_pos_matrix_random_sampling(
+        if loss_type == "sampling":
+            loss_Q = loss_pos_matrix_random_sampling(
             -Contraction
             - _lambda * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
             reduce=reduce
-        )
-        # # tf = time.time()
-        loss_Q2 = gershgorin_loss(-Contraction,  
+            )
+        elif loss_type == "gersh":
+            loss_Q = gershgorin_loss(-Contraction - _lambda * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),  
             reduce=reduce, useopt=useopt)
-        # loss_Q = loss_Q1 + loss_Q2
+        elif loss_type == "mixed_samp_gersh":
+            loss_Q1 = loss_pos_matrix_random_sampling(
+            -Contraction
+            - _lambda * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),
+            reduce=reduce
+            )
+            loss_Q2 = gershgorin_loss(-Contraction - _lambda * torch.eye(Contraction.shape[-1]).unsqueeze(0).type(x.dtype),  
+            reduce=reduce, useopt=useopt)
+            loss_Q = loss_Q1 + loss_Q2
+        else:
+            raise ValueError("loss_type not supported")
+        
         # trueigs = torch.linalg.eigvalsh(Contraction).max(dim=1)[0]
         # # print("true eigs: ", trueigs.shape, trueigs)
         # loss_Q3 = (trueigs[trueigs > 0]).mean()
         # print("loss_Q: ", loss_Q.shape, loss_Q)
-        loss_Q = loss_Q1 + loss_Q2 #+ loss_Q3
+
         tf = time.time()
 
         loss_C1 = loss_pos_matrix_random_sampling(
@@ -750,6 +774,7 @@ def main(args=None):
                    detach,
                    clone,
                    useopt,
+                   loss_type,
                    verbose=False):
         """
         This function calculates one batch of adversarial inputs using a PGD attack.
@@ -788,7 +813,8 @@ def main(args=None):
             clone=clone,
             zero_order=False,
             reduce=False, # key to computing loss value for every example in the batch
-            useopt=useopt
+            useopt=useopt,
+            loss_type=loss_type
         )
         batch_loss_uptbd = batch_losses_uptbd[0]
         #  keep track of most adversarial input found so far for each training example
@@ -843,7 +869,8 @@ def main(args=None):
                 detach=detach,
                 clone=clone,
                 zero_order=False,
-                useopt=useopt
+                useopt=useopt,
+                loss_type=loss_type,
             )
             if acc:
                 _, _, _, _, _, _, times = stats
@@ -904,7 +931,8 @@ def main(args=None):
             clone=clone,
             zero_order=False,
             reduce=False, # key to computing loss value for every example in the batch
-            useopt=useopt
+            useopt=useopt,
+            loss_type=loss_type,
         )
         batch_loss = batch_losses[0] # only use Q loss
 
@@ -955,15 +983,7 @@ def main(args=None):
         # xref_ptb = xref_ptb.unsqueeze(-1)
         # xerr_ptb = xerr_ptb.unsqueeze(-1)
         # _, p1, p2, l3, CEstats = forward(
-        #     x_ptb,
-        #     xref_ptb,
-        #     uref_ptb,
-        #     _lambda=args._lambda,
-        #     verbose=False,
-        #     acc=True,
-        #     detach=detach,
-        #     clone=clone,
-        #     zero_order=False,
+        #     ...
         #     reduce=False # key to computing loss value for every example in the batch
         # )
         # if verbose:
@@ -1041,21 +1061,24 @@ def main(args=None):
             if robust:
                 if train:
                     attack_iters = args.robust_attack_iters_train
+                    robust_restarts = args.robust_restarts
                 else:
                     attack_iters = args.robust_attack_iters_test
+                    robust_restarts = 100
                 robust_eps_i = ptb_sched(epoch + (b + 1)/num_train_batches)
                 if robust_eps_i > 0:
                     delta, stats, Q_time = attack_pgd(torch.concatenate([x, xref, uref], dim=1),
                                     robust_eps_i,
                                     args.robust_alpha, 
                                     attack_iters,
-                                    args.robust_restarts,
+                                    robust_restarts,
                                     args.robust_norm,
                                         train,
                                         acc,
                                         detach,
                                         clone,
                                         useopt=args.useopt,
+                                        loss_type=args.loss_type,
                                         verbose=verbose)
                     total_num_new_CEs += stats.num_new_CEs 
                     total_num_lost_CEs += stats.num_lost_CEs   
@@ -1078,7 +1101,8 @@ def main(args=None):
                 clone=clone,
                 zero_order=False,
                 CEs=CEs,
-                useopt=args.useopt      
+                useopt=args.useopt,
+                loss_type=args.loss_type,      
             )
 
             if reg_coeff > 0.0:
